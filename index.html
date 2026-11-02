@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voyager 2 Voxel</title>
+<style>
+  /* single deliberate look: deep-space instrument panel over a full-bleed WebGL view */
+  :root { color-scheme: dark; --bg: #000; --fg: #e9edf3; --dim: #9aa4b2; --panel: rgba(12,16,24,.72); --line: rgba(255,255,255,.12);
+          --sourced: #5fd38a; --derived: #6fb3ff; --approx: #f2c14e; --guess: #ff8f6b; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden;
+               font: 13px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #view, #labels { position: fixed; inset: 0; }
+  #labels { pointer-events: none; }
+  .lbl { position: absolute; left: 0; top: 0; color: var(--dim); font-size: 11px; white-space: nowrap; text-shadow: 0 0 3px #000; }
+  .lbl.near { color: var(--fg); font-weight: 600; }
+  #hud { position: fixed; left: max(16px, env(safe-area-inset-left, 0px)); top: calc(16px + env(safe-area-inset-top, 0px)); background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+         padding: 10px 12px; min-width: 250px; backdrop-filter: blur(4px); }
+  #hud .row { display: flex; justify-content: space-between; gap: 14px; }
+  #hud .k { color: var(--dim); }
+  #date { font-size: 15px; font-weight: 600; }
+  #phase { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); max-width: 300px; }
+  .tag { font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid currentColor; vertical-align: 1px; }
+  .tag.sourced { color: var(--sourced); } .tag.derived { color: var(--derived); } .tag.approx { color: var(--approx); } .tag.guess { color: var(--guess); }
+  #bar { position: fixed; left: max(16px, env(safe-area-inset-left, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); display: flex; gap: 8px; align-items: center;
+         background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  button { background: rgba(255,255,255,.08); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px;
+           font: inherit; cursor: pointer; }
+  button:hover { background: rgba(255,255,255,.16); }
+  button:focus-visible, #scrub:focus-visible { outline: 2px solid var(--derived); outline-offset: 2px; }
+  #spd { min-width: 96px; text-align: center; color: var(--dim); }
+  #scrub { flex: 1; min-width: 60px; accent-color: #6fb3ff; }
+  #panel { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); top: calc(16px + env(safe-area-inset-top, 0px)); bottom: calc(76px + env(safe-area-inset-bottom, 0px)); width: 340px; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 8px; padding: 8px 0; overflow: auto; transform: translateX(calc(100% + 24px)); transition: transform .25s; }
+  #panel.open { transform: none; }
+  #events { list-style: none; margin: 0; padding: 0; }
+  #events li { padding: 4px 12px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,.04); }
+  #events li:hover { background: rgba(255,255,255,.07); }
+  #events .d { color: var(--dim); }
+  #toast { position: fixed; left: 50%; top: 16px; transform: translate(-50%, -140%); max-width: min(560px, calc(100% - 32px));
+           background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; transition: transform .3s; }
+  #toast.show { transform: translate(-50%, 0); }
+  #legend { color: var(--dim); font-size: 11px; margin-top: 6px; }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; color: var(--dim); }
+  @media (max-width: 640px) {
+    #hud { left: 8px; top: 8px; right: 8px; min-width: 0; font-size: 12px; }
+    #panel { left: 8px; right: 8px; width: auto; top: 8px; bottom: 70px; }
+    #bar { left: 8px; right: 8px; bottom: 8px; flex-wrap: wrap; }
+    #legend, .hide-sm { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="labels"></div>
+<div id="loading">loading trajectory…</div>
+<div id="hud">
+  <div id="date">—</div>
+  <div class="row"><span class="k">mission time</span><span id="met">—</span></div>
+  <div class="row"><span class="k">from Sun</span><span id="dsun">—</span></div>
+  <div class="row"><span class="k">from Earth</span><span id="dearth">—</span></div>
+  <div class="row"><span class="k">light time</span><span id="lt">—</span></div>
+  <div class="row"><span class="k">speed</span><span id="vel">—</span></div>
+  <div class="row"><span class="k">framing</span><span id="near">—</span></div>
+  <div id="phase">—</div>
+  <div id="legend"><span class="tag sourced">sourced</span> <span class="tag derived">derived</span> <span class="tag approx">approx</span> <span class="tag guess">guess</span></div>
+</div>
+<div id="toast"></div>
+<div id="panel"><ul id="events"></ul></div>
+<div id="bar">
+  <button id="slower" title="slower ([)">−</button>
+  <button id="play" title="pause (space)">❚❚</button>
+  <button id="faster" title="faster (])">+</button>
+  <span id="spd">auto</span>
+  <button id="autobtn" title="auto speed (a)">auto</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="mission timeline">
+  <button id="expo" class="hide-sm">Exposure: auto</button>
+  <button id="evtoggle">Events</button>
+</div>
+<script type="module" src="app/js/main.js"></script>
+</body>
+</html>
