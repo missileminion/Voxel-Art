@@ -17,7 +17,7 @@ export async function loadMission(base = 'app/data/') {
 }
 
 // binary data; hosts that cannot serve .bin get a base64 copy (<name>.b64.txt)
-async function loadBin(base, name) {
+export async function loadBin(base, name) {
   const r = await fetch(base + name + '.bin').catch(() => null);
   if (r && r.ok && !(r.headers.get('content-type') || '').includes('text/html')) return r.arrayBuffer();
   const txt = await (await fetch(base + name + '.b64.txt')).text();

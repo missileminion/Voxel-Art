@@ -69,7 +69,7 @@ export class Stack {
     if (!on) return;
     const ry = this.refY(tl);
     this.group.quaternion.copy(q);
-    this.group.position.set(0, -ry, 0).applyQuaternion(q);
+    this.group.position.set(0, -ry + (this.lift || 0), 0).applyQuaternion(q);
     for (const [name, part] of Object.entries(this.parts)) {
       if (this.attached(name, tl)) {
         if (part.parent !== this.group) this.group.add(part);

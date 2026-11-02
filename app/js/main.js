@@ -1,7 +1,7 @@
 // Voyager 2 voxel mission viewer.
 import * as THREE from './vendor/three.module.js';
-import { loadMission, tdbToDate, v3 } from './data.js';
-import { voxelSphere, voxelRing, SURFACES, buildVoyager, buildPad } from './voxel.js';
+import { loadMission, loadBin, tdbToDate, v3 } from './data.js';
+import { buildVoyager, buildPad } from './voxel.js';
 import { Stack } from './launch.js';
 
 const $ = (id) => document.getElementById(id);
@@ -30,80 +30,139 @@ const ambient = new THREE.AmbientLight(0x8090b0, 0.02); scene.add(ambient);
 const skyFill = new THREE.HemisphereLight(0xa8c8ff, 0x4a5a3a, 0); scene.add(skyFill);
 const voxMat = new THREE.MeshLambertMaterial();
 
-// ---------------------------------------------------------------- stars
+// ---------------------------------------------------------------- shared shader bits (log depth)
+const LD_V = '#include <common>\n#include <logdepthbuf_pars_vertex>\n', LD_F = '#include <logdepthbuf_pars_fragment>\n';
+const texLoader = new THREE.TextureLoader();
+const texCache = {};
+function tex(name, srgb = true) {
+  if (texCache[name]) return texCache[name];
+  const t = texLoader.load('app/tex/' + name); if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy(); return (texCache[name] = t);
+}
+
+// ---------------------------------------------------------------- sky: real star catalogue (to mag 8) + Milky Way
+// both are built in equatorial J2000 and turned into the ecliptic scene frame by one rotation about x
+const skyGroup = new THREE.Group(); skyGroup.rotation.x = -23.4392911 * Math.PI / 180; scene.add(skyGroup);
+const skyUniforms = { gain: { value: 1 } };
+const milky = new THREE.Mesh(new THREE.SphereGeometry(3e6, 96, 48), new THREE.MeshBasicMaterial({ map: tex('milkyway.jpg'), side: THREE.BackSide, depthWrite: false, depthTest: false, toneMapped: false }));
+milky.rotation.x = Math.PI / 2; milky.renderOrder = -20; skyGroup.add(milky);
 {
-  const n = 5000, pos = new Float32Array(n * 3), col = new Float32Array(n * 3), size = new Float32Array(n);
-  let seed = 7; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const buf = await loadBin('app/tex/', 'stars'), a = new Float32Array(buf), n = a.length / 5;
+  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), mag = new Float32Array(n);
+  const BV = [[-0.4, 0.61, 0.70, 1.0], [0.0, 0.79, 0.85, 1.0], [0.4, 1.0, 0.97, 0.93], [0.8, 1.0, 0.88, 0.73], [1.2, 1.0, 0.78, 0.56], [1.6, 1.0, 0.69, 0.43], [2.2, 1.0, 0.6, 0.32]];
   for (let i = 0; i < n; i++) {
-    const z = rnd() * 2 - 1, a = rnd() * Math.PI * 2, r = Math.sqrt(1 - z * z), R = 3e5;
-    pos.set([Math.cos(a) * r * R, Math.sin(a) * r * R, z * R], i * 3);
-    const m = Math.pow(rnd(), 3), t = rnd();
-    col.set([0.75 + 0.25 * t, 0.8 + 0.1 * t, 1.0 - 0.25 * t].map(c => c * (0.35 + m)), i * 3);
-    size[i] = 1 + m * 2.5;
+    pos[i * 3] = a[i * 5] * 2.5e6; pos[i * 3 + 1] = a[i * 5 + 1] * 2.5e6; pos[i * 3 + 2] = a[i * 5 + 2] * 2.5e6; mag[i] = a[i * 5 + 3];
+    const bv = Math.max(-0.4, Math.min(2.2, a[i * 5 + 4])); let k = 0; while (k < BV.length - 2 && bv > BV[k + 1][0]) k++;
+    const f = (bv - BV[k][0]) / (BV[k + 1][0] - BV[k][0]);
+    for (let c = 0; c < 3; c++) col[i * 3 + c] = BV[k][c + 1] + (BV[k + 1][c + 1] - BV[k][c + 1]) * f;
   }
   const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.BufferAttribute(col, 3)); g.setAttribute('size', new THREE.BufferAttribute(size, 1));
-  const m = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, vertexColors: true,
-    vertexShader: 'attribute float size; varying vec3 vC; void main(){ vC=color; vec4 mv=modelViewMatrix*vec4(position,1.0); gl_PointSize=size; gl_Position=projectionMatrix*mv; }',
-    fragmentShader: 'varying vec3 vC; void main(){ vec2 d=gl_PointCoord-0.5; if(dot(d,d)>0.25) discard; gl_FragColor=vec4(vC,1.0); }' });
-  const stars = new THREE.Points(g, m); stars.frustumCulled = false; stars.renderOrder = -10; scene.add(stars);
-  var starField = stars;
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.BufferAttribute(col, 3)); g.setAttribute('mag', new THREE.BufferAttribute(mag, 1));
+  // drawn in the opaque pass, before everything else (additive blending still applies without 'transparent')
+  const m = new THREE.ShaderMaterial({ uniforms: { gain: skyUniforms.gain, dpr: { value: renderer.getPixelRatio() } }, transparent: false, depthWrite: false, depthTest: false,
+    blending: THREE.AdditiveBlending, vertexColors: true, toneMapped: false,
+    vertexShader: `attribute float mag; uniform float dpr; varying vec3 vC; varying float vA;
+      void main(){ float I = pow(10.0, -0.4 * (mag - 1.0));
+        vA = clamp(0.10 + 0.9 * pow(10.0, -0.4 * (mag - 4.2)), 0.0, 1.0);
+        vC = color; gl_PointSize = clamp(1.3 + 2.4 * pow(I, 0.28), 1.3, 7.0) * dpr;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform float gain; varying vec3 vC; varying float vA;
+      void main(){ vec2 d = gl_PointCoord - 0.5; float r = dot(d, d) * 4.0; if (r > 1.0) discard;
+        float k = exp(-r * 3.5) + 0.12 * exp(-r * 0.8); gl_FragColor = vec4(vC * k * vA * gain, 1.0); }` });
+  const stars = new THREE.Points(g, m); stars.frustumCulled = false; stars.renderOrder = -19; skyGroup.add(stars);
 }
 
-// ---------------------------------------------------------------- bodies
+// ---------------------------------------------------------------- bodies: smooth textured spheres
 const planets = meta.planets;
-const VOX_N = { sun: 40, mercury: 28, venus: 40, earth: 88, moon: 36, mars: 40, jupiter: 80, saturn: 72, uranus: 56, neptune: 56 };
 const bodyList = [];
-function makeBody(name, R, Rp, colorKey, opts = {}) {
-  const b = { name, R, Rp: Rp || R, colorKey, mesh: null, group: new THREE.Group(), N: opts.N || 24, pole: opts.pole, rot: opts.rot,
-              alb: opts.alb ?? 0.3, isMoon: !!opts.moon, parent: opts.parent, orbit: opts.orbit, label: null, emissive: name === 'sun' };
-  scene.add(b.group);
-  bodyList.push(b);
-  return b;
+const POINT_COL = { mercury: 0xb0a89c, venus: 0xf2e6c4, earth: 0x9cb8e8, moon: 0xc8c4bc, mars: 0xe08a5a, jupiter: 0xeedfc4, saturn: 0xe8d6a6,
+  uranus: 0xb8e2e6, neptune: 0x7f9be8, Io: 0xf0e08a, Europa: 0xf2ece0, Ganymede: 0xc4bcb0, Callisto: 0x8a8070, Titan: 0xe8a858, Triton: 0xf0dcd4 };
+function makeBody(name, R, Rp, opts = {}) {
+  const b = { name, R, Rp: Rp || R, mesh: null, group: new THREE.Group(), pole: opts.pole, rot: opts.rot,
+              alb: opts.alb ?? 0.3, isMoon: !!opts.moon, parent: opts.parent, orbit: opts.orbit, emissive: name === 'sun',
+              pcol: new THREE.Color(POINT_COL[name] ?? 0xc8c4bc) };
+  scene.add(b.group); bodyList.push(b); return b;
 }
 for (const n of ['sun', 'mercury', 'venus', 'earth', 'moon', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune'])
-  makeBody(n, planets[n].r, planets[n].rp, n, { N: VOX_N[n], pole: planets[n].pole, rot: planets[n].rot, alb: planets[n].alb });
+  makeBody(n, planets[n].r, planets[n].rp, { pole: planets[n].pole, rot: planets[n].rot, alb: planets[n].alb });
 for (const m of meta.moons)
-  makeBody(m.name, m.r, m.r, m.name, { N: m.r > 1000 ? 30 : m.r > 400 ? 22 : 14, moon: true, parent: m.planet, orbit: m, alb: m.alb,
-    pole: planets[m.planet].pole, rot: 2 * Math.PI / m.n / 3600 });
+  makeBody(m.name, m.r, m.r, { moon: true, parent: m.planet, orbit: m, alb: m.alb, pole: planets[m.planet].pole });
 const byName = Object.fromEntries(bodyList.map(b => [b.name, b]));
 
-function buildHi(b) {
-  const fn = SURFACES[b.colorKey] || SURFACES.default;
-  b.meshHi = voxelSphere(Math.min(150, Math.round(b.N * 2.2)), fn, voxMat, b.Rp / b.R); b.spin.add(b.meshHi);
+const sunDirU = { value: new THREE.Vector3(1, 0, 0) };
+function atmosphere(color, strength) {
+  return new THREE.ShaderMaterial({ uniforms: { sunDir: sunDirU, col: { value: new THREE.Color(color) }, k: { value: strength } },
+    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.FrontSide,
+    vertexShader: LD_V + `varying vec3 vN; varying vec3 vV;
+      void main(){ vec4 w = modelMatrix * vec4(position, 1.0); vN = normalize(mat3(modelMatrix) * normal); vV = normalize(cameraPosition - w.xyz);
+        gl_Position = projectionMatrix * viewMatrix * w;
+        #include <logdepthbuf_vertex>
+      }`,
+    fragmentShader: LD_F + `uniform vec3 sunDir; uniform vec3 col; uniform float k; varying vec3 vN; varying vec3 vV;
+      void main(){
+        #include <logdepthbuf_fragment>
+        float rim = pow(1.0 - max(dot(vN, vV), 0.0), 2.6); float day = smoothstep(-0.25, 0.4, dot(vN, sunDir));
+        gl_FragColor = vec4(col * rim * day * k, 1.0); }` });
 }
 function buildMesh(b) {
-  const fn = SURFACES[b.colorKey] || SURFACES.default;
-  const mat = b.emissive ? new THREE.MeshBasicMaterial({ color: 0xfff4d6 }) : voxMat;
-  b.mesh = voxelSphere(b.N, fn, mat, b.Rp / b.R);
+  const key = b.name.toLowerCase(), big = !b.isMoon;
+  const geo = new THREE.SphereGeometry(1, big ? 192 : 64, big ? 96 : 32);
+  const mat = b.emissive ? new THREE.MeshBasicMaterial({ map: tex('sun.jpg'), color: 0xffffff })
+                         : new THREE.MeshLambertMaterial({ map: tex(key + '.jpg') });
+  b.mesh = new THREE.Mesh(geo, mat); b.mesh.scale.set(1, b.Rp / b.R, 1);
   b.spin = new THREE.Group(); b.spin.add(b.mesh); b.group.add(b.spin);
-  const ring = meta.rings[b.name];
-  if (ring) {
-    const cell = b.name === 'saturn' ? 0.028 : 0.02;
-    const rm = voxelRing(ring, b.R, cell, new THREE.MeshLambertMaterial({ transparent: b.name !== 'saturn', opacity: 0.6 }));
-    b.spin.add(rm); b.ring = rm;
+  if (key === 'earth') {
+    b.clouds = new THREE.Mesh(new THREE.SphereGeometry(1.0018, 160, 80), new THREE.MeshLambertMaterial({ map: tex('earth_clouds.png'), transparent: true, depthWrite: false }));
+    b.clouds.scale.copy(b.mesh.scale); b.spin.add(b.clouds);
+    b.atm = new THREE.Mesh(new THREE.SphereGeometry(1.025, 96, 48), atmosphere(0x4f8dff, 1.6)); b.group.add(b.atm);
   }
-  if (b.name === 'sun') {
-    const c = document.createElement('canvas'); c.width = c.height = 128; const g = c.getContext('2d');
-    const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
-    gr.addColorStop(0, 'rgba(255,250,235,1)'); gr.addColorStop(0.2, 'rgba(255,230,170,0.6)'); gr.addColorStop(1, 'rgba(255,200,120,0)');
-    g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
-    b.glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
+  if (key === 'venus') { b.atm = new THREE.Mesh(new THREE.SphereGeometry(1.02, 64, 32), atmosphere(0xffe8b0, 0.8)); b.group.add(b.atm); }
+  if (key === 'titan') { b.atm = new THREE.Mesh(new THREE.SphereGeometry(1.08, 64, 32), atmosphere(0xd99a42, 1.0)); b.group.add(b.atm); }
+  if (['jupiter', 'saturn', 'uranus', 'neptune'].includes(key)) {
+    const c = { jupiter: 0xe8d8b8, saturn: 0xe8d8a8, uranus: 0x9fe0e8, neptune: 0x6f8fff }[key];
+    b.atm = new THREE.Mesh(new THREE.SphereGeometry(1.012, 96, 48), atmosphere(c, 0.35)); b.atm.scale.copy(b.mesh.scale); b.spin.add(b.atm);
+  }
+  const RING = { saturn: [66000, 141000], uranus: [41000, 52000], neptune: [41000, 63500] }[key];
+  if (RING) {
+    const g = new THREE.RingGeometry(RING[0] / b.R, RING[1] / b.R, 512, 1), p = g.attributes.position, uv = g.attributes.uv;
+    for (let i = 0; i < p.count; i++) { const r = Math.hypot(p.getX(i), p.getY(i)) * b.R; uv.setXY(i, (r - RING[0]) / (RING[1] - RING[0]), 0.5); }
+    const rt = tex(key + '_ring.png');
+    b.ring = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ map: rt, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+    b.ring.rotation.x = -Math.PI / 2; b.spin.add(b.ring);
+  }
+  if (b.emissive) {
+    const c = document.createElement('canvas'); c.width = c.height = 256; const g = c.getContext('2d');
+    const gr = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+    gr.addColorStop(0, 'rgba(255,252,240,1)'); gr.addColorStop(0.08, 'rgba(255,240,210,0.9)'); gr.addColorStop(0.3, 'rgba(255,215,160,0.25)'); gr.addColorStop(1, 'rgba(255,200,140,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 256, 256);
+    b.glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, toneMapped: false }));
     b.group.add(b.glow);
   }
 }
-// smooth Earth for low altitude (voxels would be ~140 km cubes at true scale)
-const earthSmooth = (() => {
-  const g = new THREE.SphereGeometry(1, 256, 128), p = g.attributes.position, col = new Float32Array(p.count * 3), c = new THREE.Color();
-  for (let i = 0; i < p.count; i++) {
-    const n = [p.getX(i), p.getY(i), p.getZ(i)], lat = Math.asin(n[1]), lon = Math.atan2(n[2], n[0]);
-    c.set(SURFACES.earth(lat, lon, n)); col.set([c.r, c.g, c.b], i * 3);
+
+// launch-area terrain: a curved, high-resolution disc of the real Earth texture around the Cape (1,500 km radius).
+// The global sphere's flat facets would sit up to ~1 km below the true surface at the pad.
+let terrain = null;
+function buildTerrain() {
+  const Rp = Math.hypot(...PAD), NR = 170, NA = 256, verts = [], uvs = [], idx = [];
+  const [la, lo] = [Math.asin(PAD[2] / Rp), Math.atan2(PAD[1], PAD[0])];
+  const up = [Math.cos(la) * Math.cos(lo), Math.cos(la) * Math.sin(lo), Math.sin(la)], east = [-Math.sin(lo), Math.cos(lo), 0], north = v3.cross(up, east);
+  for (let i = 0; i <= NR; i++) {
+    const rho = 1500 * Math.pow(i / NR, 2.4), al = rho / Rp;
+    for (let j = 0; j <= NA; j++) {
+      const az = j / NA * 2 * Math.PI, se = Math.sin(az), cn = Math.cos(az);
+      verts.push(Rp * Math.sin(al) * se * 1000, (Rp * Math.cos(al) - Rp) * 1000, -Rp * Math.sin(al) * cn * 1000);
+      const d = v3.add(v3.scale(up, Math.cos(al)), v3.scale(v3.add(v3.scale(east, se), v3.scale(north, cn)), Math.sin(al)));
+      uvs.push(0.5 + Math.atan2(d[1], d[0]) / (2 * Math.PI), 0.5 + Math.asin(d[2]) / Math.PI);
+    }
   }
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  const m = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true }));
-  const atm = new THREE.Mesh(new THREE.SphereGeometry(1.012, 128, 64), new THREE.MeshBasicMaterial({ color: 0x5fa0ff, transparent: true, opacity: 0.18, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false }));
-  const grp = new THREE.Group(); grp.add(m, atm); scene.add(grp); grp.visible = false; return grp;
-})();
+  for (let i = 0; i < NR; i++) for (let j = 0; j < NA; j++) { const a = i * (NA + 1) + j, b2 = a + NA + 1; idx.push(a, b2, a + 1, a + 1, b2, b2 + 1); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  g.setIndex(idx); g.computeVertexNormals();
+  terrain = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ map: tex('earth.jpg'), side: THREE.DoubleSide })); terrain.frustumCulled = false;
+  padGroup.add(terrain);
+}
 const pad = buildPad(voxMat); const padGroup = new THREE.Group(); padGroup.add(pad); scene.add(padGroup);
 
 // point sprites for bodies too small to resolve
@@ -112,9 +171,9 @@ const ptGeo = new THREE.BufferGeometry();
 ptGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(PTS * 3), 3));
 ptGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(PTS * 3), 3));
 ptGeo.setAttribute('size', new THREE.BufferAttribute(new Float32Array(PTS), 1));
-const points = new THREE.Points(ptGeo, new THREE.ShaderMaterial({ transparent: true, depthWrite: false, vertexColors: true, blending: THREE.AdditiveBlending,
-  vertexShader: 'attribute float size; varying vec3 vC; void main(){ vC=color; vec4 mv=modelViewMatrix*vec4(position,1.0); gl_PointSize=size; gl_Position=projectionMatrix*mv; }',
-  fragmentShader: 'varying vec3 vC; void main(){ vec2 d=gl_PointCoord-0.5; float r=dot(d,d); if(r>0.25) discard; gl_FragColor=vec4(vC*(1.0-r*3.0),1.0); }' }));
+const points = new THREE.Points(ptGeo, new THREE.ShaderMaterial({ transparent: true, depthWrite: false, vertexColors: true, blending: THREE.AdditiveBlending, toneMapped: false,
+  vertexShader: LD_V + 'attribute float size; varying vec3 vC; void main(){ vC=color; vec4 mv=modelViewMatrix*vec4(position,1.0); gl_PointSize=size; gl_Position=projectionMatrix*mv;\n#include <logdepthbuf_vertex>\n}',
+  fragmentShader: LD_F + 'varying vec3 vC; void main(){\n#include <logdepthbuf_fragment>\n vec2 d=gl_PointCoord-0.5; float r=dot(d,d)*4.0; if(r>1.0) discard; gl_FragColor=vec4(vC*(exp(-r*3.0)+0.1),1.0); }' }));
 points.frustumCulled = false; scene.add(points);
 
 // ---------------------------------------------------------------- spacecraft
@@ -193,7 +252,8 @@ function stackQuat(t) {
   const y = toV(dir).normalize(), north = toV(v3.norm(v3.cross(up, v3.cross([0, 0, 1], up))));
   let x = new THREE.Vector3().crossVectors(y, north); if (x.lengthSq() < 1e-6) x.set(1, 0, 0); x.normalize();
   const z = new THREE.Vector3().crossVectors(x, y);
-  return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+  // roll so the SRMs sit north/south and the lettered side of the core faces east (the press-site view)
+  return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z)).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2));
 }
 const qCache = new Map();
 function qAt(t) { const k = Math.round(t * 10); if (!qCache.has(k)) { if (qCache.size > 400) qCache.clear(); qCache.set(k, stackQuat(t)); } return qCache.get(k); }
@@ -326,7 +386,9 @@ function frame() {
   const sunUp = v3.dot(v3.norm(rE), v3.norm(v3.sub(sun.p, earth.p)));
   const sky = Math.max(0, Math.min(1, 1 - alt / 70)) * Math.max(0, Math.min(1, sunUp * 4 + 0.2));
   scene.background.setRGB(0.32 * sky, 0.55 * sky, 0.95 * sky);
-  starField.visible = sky < 0.3;
+  skyGroup.visible = sky < 0.35; skyGroup.position.copy(camera.position);
+  skyUniforms.gain.value = (1 - sky / 0.35) * Math.min(1.2, 0.55 + 0.17 * Math.log10(st.exposure + 1e-9) + 0.25);
+  milky.material.color.setScalar(skyUniforms.gain.value);
   skyFill.intensity = 1.6 * sky; skyFill.position.copy(toV(v3.norm(rE)));
   const pressure = Math.exp(-Math.max(alt, 0) / 7.2);
   const vacuum = Math.min(1, Math.max(0, (alt - 12) / 60)) ** 1.5;   // plume expansion with altitude
@@ -334,63 +396,63 @@ function frame() {
   // bodies
   const H = renderer.domElement.height, f = (H / 2) / Math.tan(camera.fov * Math.PI / 360);
   const pp = ptGeo.attributes.position.array, pc = ptGeo.attributes.color.array, ps = ptGeo.attributes.size.array;
+  sunDirU.value.copy(toV(v3.norm(toSun)));
   bodyList.forEach((b, i) => {
     const s = b._s || bodyState(b.name, t);
     ps[i] = 0;
-    if (!s) { b.group.visible = false; if (labels[b.name]) labels[b.name].style.display = 'none'; return; }
+    if (!s) { b.group.visible = false; return; }
     const rel = v3.sub(s.p, X.p), Dkm = v3.len(rel), D = Dkm * 1000, u = v3.scale(rel, 1 / Dkm);
     const R = b.R * 1000, surf = D - R;
+    // true scale near a surface; farther away a log-compressed distance with angular size preserved
     const Dr = (surf < 2e6 && D < 3e7) ? D : (D < 5e3 ? D : 5e3 * (1 + Math.log(D / 5e3)));
     const sc = Dr / D, px = (b.R / Dkm) * f;
-    const isEarthLow = b.name === 'earth' && alt < 1500;
-    earthSmooth.visible = earthSmooth.visible || false;
-    if (px > 1.6 || isEarthLow) {
-      if (!b.mesh && !isEarthLow) buildMesh(b);
-      if (b.mesh && !b.emissive && !b.isMoon) { const hi = px > 700; if (hi && !b.meshHi) buildHi(b); b.mesh.visible = !hi; if (b.meshHi) b.meshHi.visible = hi; }
-      b.group.visible = !isEarthLow; b.group.position.set(u[0] * Dr, u[1] * Dr, u[2] * Dr); b.group.scale.setScalar(R * sc);
-      // orientation: +y = pole; spin about it
-      if (b.spin) {
-        if (b.name === 'earth') {
-          const M = ecefToWorld(t); const ex = toV(mv(M, [1, 0, 0])), ez = toV(mv(M, [0, 0, 1])), ey = toV(mv(M, [0, -1, 0]));
-          b.spin.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(ex, ez, ey.negate().negate()));
-        } else {
-          const pole = toV(b.pole), q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), pole);
-          const spin = (t / 3600) / b.rot * 2 * Math.PI;
-          b.spin.quaternion.copy(q).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), spin));
-        }
-      }
-      if (b.glow) { b.glow.scale.setScalar(6 + 2 * Math.min(4, E)); }
-      if (isEarthLow) {
-        earthSmooth.visible = true; earthSmooth.position.set(u[0] * D, u[1] * D, u[2] * D); earthSmooth.scale.setScalar(6371000);
+    const show = (px > 1.6 || b.emissive) && !(b.name === 'earth' && alt < 60);
+    if (show) {
+      if (!b.mesh) buildMesh(b);
+      b.group.visible = true; b.group.position.set(u[0] * Dr, u[1] * Dr, u[2] * Dr); b.group.scale.setScalar(R * sc);
+      if (b.name === 'earth') {
         const M = ecefToWorld(t);
-        earthSmooth.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(toV(mv(M, [1, 0, 0])), toV(mv(M, [0, 0, 1])), toV(mv(M, [0, 1, 0])).negate()));
+        b.spin.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(toV(mv(M, [1, 0, 0])), toV(mv(M, [0, 0, 1])), toV(mv(M, [0, -1, 0]))));
+        b.clouds.rotation.y = (t / 86400) * 0.15;                         // clouds drift slowly against the ground
+      } else if (b.orbit || b.name === 'moon') {
+        // synchronous rotation: sub-planet point at texture longitude 0, leading hemisphere at +90
+        let r, h;
+        if (b.orbit) { const o = b.orbit, ph = o.phi0 + o.n * (t - o.t0); r = v3.add(v3.scale(o.e1, Math.cos(ph)), v3.scale(o.e2, Math.sin(ph))); h = v3.norm(v3.cross(o.e1, o.e2)); }
+        else { const E = bodyState('earth', t); r = v3.norm(v3.sub(s.p, E.p)); h = v3.norm(v3.cross(r, v3.sub(s.v, E.v))); }
+        const x = toV(r).negate().normalize(), y = toV(h), z = new THREE.Vector3().crossVectors(x, y).normalize(); y.crossVectors(z, x);
+        b.spin.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+      } else {
+        const pole = toV(b.pole), q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), pole);
+        b.spin.quaternion.copy(q).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), (t / 3600) / b.rot * 2 * Math.PI));
+      }
+      if (b.emissive) {
+        const Dr2 = 5e3 * (1 + Math.log(D / 5e3)); b.group.position.set(u[0] * Dr2, u[1] * Dr2, u[2] * Dr2); b.group.scale.setScalar(R * Dr2 / D);
+        b.glow.scale.setScalar(Math.max(6, (14 + 10 * Math.min(1, E)) * renderer.getPixelRatio() / Math.max(px, 1e-4)));
       }
     } else b.group.visible = false;
-    if (b.name === 'earth' && !isEarthLow) earthSmooth.visible = false;
-    // brightness of unresolved bodies: albedo x cross-section x phase / distances^2
-    if (px <= 1.6 && b.name !== 'sun') {
+    // unresolved bodies: point brightness from albedo x cross-section x phase law / distances^2
+    if (px <= 1.6 && !b.emissive) {
       const sb = v3.sub(sun.p, s.p), dsb = v3.len(sb) / AU;
       const cosA = v3.dot(v3.norm(sb), v3.scale(u, -1)), a = Math.acos(Math.max(-1, Math.min(1, cosA)));
       const phase = (Math.sin(a) + (Math.PI - a) * Math.cos(a)) / Math.PI;
-      const F = b.alb * (b.R / Dkm) ** 2 * phase / (dsb * dsb);
-      const lum = F * st.exposure / 2.6e-10;
-      if (lum > 1e-4) {
+      const lum = b.alb * (b.R / Dkm) ** 2 * phase / (dsb * dsb) * st.exposure / 2.6e-10;
+      if (lum > 2e-4) {
         const pos = Math.min(Dr, 2.5e5) / Dr;
         pp.set([u[0] * Dr * pos, u[1] * Dr * pos, u[2] * Dr * pos], i * 3);
-        ps[i] = Math.max(1.2, Math.min(8, 2.4 + 1.1 * Math.log10(lum)));
-        const k = Math.min(1, 0.25 + 0.3 * Math.log10(lum + 1) + Math.min(1, lum) * 0.5);
-        const c = new THREE.Color(SURFACES[b.colorKey] ? SURFACES[b.colorKey](0.2, 0.3, [0.5, 0.5, 0.5]) : 0xcccccc);
-        pc.set([c.r * k + 0.15 * k, c.g * k + 0.15 * k, c.b * k + 0.15 * k], i * 3);
+        ps[i] = Math.max(1.4, Math.min(9, 2.6 + 1.2 * Math.log10(lum))) * renderer.getPixelRatio();
+        const k = Math.min(1.2, 0.3 + 0.3 * Math.log10(lum + 1) + Math.min(1, lum) * 0.5);
+        pc.set([b.pcol.r * k, b.pcol.g * k, b.pcol.b * k], i * 3);
       }
     }
-    if (b.name === 'sun') { b.group.visible = true; if (!b.mesh) buildMesh(b); const Dr2 = 5e3 * (1 + Math.log(D / 5e3)); b.group.position.set(u[0] * Dr2, u[1] * Dr2, u[2] * Dr2); b.group.scale.setScalar(R * Dr2 / D); if (b.glow) b.glow.scale.setScalar(Math.max(8, 40 * (1 / dSun))); }
     b._u = u; b._Dr = Dr;
   });
   ptGeo.attributes.position.needsUpdate = ptGeo.attributes.color.needsUpdate = ptGeo.attributes.size.needsUpdate = true;
 
   // pad (rotates with the Earth)
   padGroup.visible = alt < 150;
+  if (padGroup.visible && !terrain) buildTerrain();
   if (padGroup.visible) {
+    pad.visible = alt < 40;
     const M = ecefToWorld(t), padW = v3.add(earth.p, mv(M, PAD)), rel = v3.scale(v3.sub(padW, X.p), 1000);
     const [la, lo] = PADLL;
     const up = toV(mv(M, [Math.cos(la) * Math.cos(lo), Math.cos(la) * Math.sin(lo), Math.sin(la)]));
@@ -408,20 +470,22 @@ function frame() {
     const p = [0, 1, 2].map(k => Xd.p[k] + (Xd.v[k] + dv.getComponent(k) / 1000) * dt + 0.5 * g[k] * dt * dt);
     const rel = v3.scale(v3.sub(p, X.p), 1000); return toV(rel);
   };
+  // near the ground the trajectory point is the pad; raise the stack so its base sits on the launch platform
+  stack.lift = (stack.refY(tl) + 4) * Math.max(0, Math.min(1, 1 - (alt - 0.5) / 4));
   if (tl > -3600 && inStack) {
     const q = qAt(t);
     stack.update(tl, q, pressure, simDt, dtr, vacuum, { relSince, qAt: (td) => qAt(TL + td) });
     // stowed Voyager sits on top of the propulsion module, antenna up the thrust axis
     qv = q.clone().multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0)));
     voy.quaternion.copy(qv);
-    voy.position.set(0, 43.3 - stack.refY(tl), 0).applyQuaternion(q);
+    voy.position.set(0, 43.3 - stack.refY(tl) + stack.lift, 0).applyQuaternion(q);
     voy.visible = tl > 285 || true;
     vparts.whips.visible = false; magPivot.scale.set(1, 0.02, 1);
     // smoke: world-anchored puffs drifting with the rotating atmosphere
     const w = 7.2921159e-5;
     stack.drawSmoke((s) => {
       if (!s.w) {
-        const nz = new THREE.Vector3(...s.nz).add(new THREE.Vector3(0, -stack.refY(s.born) - 4, 0)).applyQuaternion(qAt(TL + s.born));
+        const nz = new THREE.Vector3(...s.nz).add(new THREE.Vector3(0, -stack.refY(s.born) - 4 + stack.lift, 0)).applyQuaternion(qAt(TL + s.born));
         const Xb = vehicle(TL + s.born), Eb = bodyState('earth', TL + s.born), M = ecefToWorld(TL + s.born), ax = mv(M, [0, 0, 1]);
         const rb = v3.sub(Xb.p, Eb.p), vrot = v3.scale(v3.cross(ax, rb), w);
         s.w = { p: v3.add(Xb.p, [nz.x / 1000, nz.y / 1000, nz.z / 1000]), v: v3.add(Eb.v, vrot), j: [Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5] };
@@ -455,12 +519,21 @@ function frame() {
   const nu = toV(near._u).negate();                 // from nearest body toward the craft
   if (!camU) camU = nu.clone();
   camU.lerp(nu, 1 - Math.exp(-dtr / 1.2)).normalize();
-  const altTilt = near.name === 'earth' ? 25 + 60 * Math.exp(-Math.max(alt, 0) / 300) : 28;
-  const lookW = near.name === 'earth' ? 0.3 * (1 - Math.exp(-Math.max(alt, 0) / 80)) : 0.38;
+  const altTilt = near.name === 'earth' ? 22 + 63 * Math.exp(-Math.max(alt, 0) / 300) : 22;
+  const lookW = near.name === 'earth' ? 0.5 * (1 - Math.exp(-Math.max(alt, 0) / 80)) : 0.5;
   let k = new THREE.Vector3().crossVectors(camU, NORTH); if (k.lengthSq() < 1e-6) k.set(1, 0, 0); k.normalize();
-  const c = camU.clone().applyAxisAngle(k, altTilt * Math.PI / 180 + st.userPitch).applyAxisAngle(camU, st.userYaw).normalize();
-  const dist = (inStack && tl > -3600 ? (tl < 122 ? 150 : tl < 478 ? 110 : tl < meta.launch.t_sep ? 60 : 30) : 26) * st.zoom;
-  camera.position.copy(c).multiplyScalar(dist);
+  let c = camU.clone().applyAxisAngle(k, altTilt * Math.PI / 180 + st.userPitch).applyAxisAngle(camU, st.userYaw).normalize();
+  if (near.name === 'earth' && alt < 80) {
+    // launch: look west from the ocean side (east-south-east), tower behind the vehicle as in the press photos
+    const M = ecefToWorld(t), [la, lo] = PADLL;
+    const east = toV(mv(M, [-Math.sin(lo), Math.cos(lo), 0])), north = toV(mv(M, [-Math.sin(la) * Math.cos(lo), -Math.sin(la) * Math.sin(lo), Math.cos(la)]));
+    const hz = east.multiplyScalar(0.85).add(north.multiplyScalar(-0.35)).normalize().applyAxisAngle(camU, st.userYaw);
+    const el = (90 - altTilt) * Math.PI / 180 + st.userPitch;
+    const cl = camU.clone().multiplyScalar(Math.sin(el)).add(hz.multiplyScalar(Math.cos(el))).normalize();
+    c = cl.lerp(c, Math.max(0, Math.min(1, (alt - 30) / 50))).normalize();
+  }
+  const dist = (inStack && tl > -3600 ? (tl < 3 ? 105 : tl < 122 ? 150 : tl < 478 ? 110 : tl < meta.launch.t_sep ? 60 : 30) : 26) * st.zoom;
+  camera.position.copy(c).multiplyScalar(dist).add(camU.clone().multiplyScalar(inStack ? stack.lift : 0));
   const look = c.clone().negate().lerp(camU.clone().negate(), lookW).normalize();
   camera.up.copy(camU); if (Math.abs(look.dot(camU)) > 0.995) camera.up.copy(NORTH);
   camera.lookAt(camera.position.clone().add(look));

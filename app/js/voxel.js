@@ -195,54 +195,88 @@ export function buildVoyager(mat) {
   return parts;
 }
 
-// ---- Titan IIIE / Centaur (metres; +y up, base of core at y = 0) ------------------------------
+// ---- Titan IIIE / Centaur, modelled on the TC-7 (Voyager 2) launch photographs ---------------
+// metres; +y up, base of the core at y = 0. Core and SRMs 3.05 m diameter, shroud 4.27 m, overall ~48.8 m.
+const FONT = { U: ['101', '101', '101', '101', '111'], N: ['101', '111', '111', '111', '101'], I: ['111', '010', '010', '010', '111'],
+  T: ['111', '010', '010', '010', '010'], E: ['111', '100', '110', '100', '111'], D: ['110', '101', '101', '101', '110'],
+  S: ['111', '100', '111', '001', '111'], A: ['010', '101', '111', '101', '101'] };
 export function buildTitan(mat) {
-  const P = {};
-  const R = 1.52, s = 0.2;
-  const WHITE = 0xeeeeea, BLACK = 0x1c1c1c, CORE = 0xb8b2a4, CSS = 0xf4f4f4, SILVER = 0xb9bec4, NOZ = 0x2a2a2a;
-  // stage 1 (LR87 twin)
+  const P = {}, s = 0.15, R = 1.525;
+  const SRM_WHITE = 0xf1f1ee, JOINT = 0x55585c, CORE = 0xc8a676, CORE_DK = 0xb08d5e, SILVER = 0xbfc3c8, PANEL = 0xa4a9ae,
+        WHITE = 0xf4f4f1, ORANGE = 0xc4532c, NOZ = 0x2b2b2b, BLACK = 0x161616, RIB = 0xe2e2de;
+  // ---- stage 1 (two LR87 engines) with the vertical "UNITED STATES" lettering and roll-pattern squares
+  const letters = 'UNITED STATES'.replace(' ', '');
+  const lettering = (x, y, z) => {
+    if (z < R * 0.6) return null;                                      // only on the +z face
+    const yTop = 18.2, h = 0.95, row = Math.floor((yTop - y) / h);
+    if (row < 0 || row >= letters.length) return null;
+    const g = FONT[letters[row]]; if (!g) return null;
+    const fy = Math.floor(((yTop - y) - row * h) / (h / 6)), fx = Math.floor((x + 0.33) / 0.22);
+    if (fy < 0 || fy > 4 || fx < 0 || fx > 2) return null;
+    return g[fy][fx] === '1' ? BLACK : null;
+  };
   let v = new VoxelSet(s);
-  v.cyl(0, 0, R, 0.0, 22.2, (x, y) => (y > 21.6 ? 0x8c8778 : CORE));
-  for (const dx of [-0.65, 0.65]) v.cone(dx, 0, 0.35, 0.55, -2.4, -0.2, NOZ, 1);
-  P.stage1 = v.mesh(mat); P.stage1.userData.nozzles = [[-0.65, -2.4, 0], [0.65, -2.4, 0]];
-  // stage 2 (LR91)
+  v.cyl(0, 0, R, 0.0, 22.2, (x, y, z) => {
+    if (y > 21.7 || (y > 0.4 && y < 1.0) || (y > 11.0 && y < 11.4)) return SILVER;            // bands
+    if (y > 19.2 && y < 20.4) return (Math.floor((Math.atan2(z, x) + Math.PI) / (Math.PI / 4)) % 2) ? BLACK : WHITE;  // roll pattern
+    return lettering(x, y, z) ?? (y < 2.4 ? CORE_DK : CORE);
+  });
+  for (const dx of [-0.68, 0.68]) v.cone(dx, 0, 0.36, 0.6, -2.6, -0.1, NOZ, 1);
+  P.stage1 = v.mesh(mat); P.stage1.userData.nozzles = [[-0.68, -2.6, 0], [0.68, -2.6, 0]];
+  // ---- stage 2 (LR91)
   v = new VoxelSet(s);
-  v.cyl(0, 0, R, 22.4, 29.4, (x, y) => (y < 23.0 ? 0x8c8778 : CORE));
-  v.cone(0, 0, 0.45, 0.75, 21.0, 22.4, NOZ, 1);
+  v.cyl(0, 0, R, 22.35, 29.3, (x, y) => (y < 22.9 || y > 28.8 || (y > 25.6 && y < 26.0) ? SILVER : CORE));
+  v.cone(0, 0, 0.5, 0.8, 21.0, 22.3, NOZ, 1);
   P.stage2 = v.mesh(mat); P.stage2.userData.nozzles = [[0, 21.0, 0]];
-  // SRMs (UA1205, 5 segments) -- white with black bands
+  // ---- SRMs (UA1205, five segments): white, thin dark joints, blunt ogive nose, orange aft skirt panel
   for (const side of [-1, 1]) {
     v = new VoxelSet(s);
-    const cx = side * (R + 1.55);
-    v.cyl(cx, 0, R, 1.2, 26.0, (x, y) => ((y > 22 && y < 23.6) || (y > 3 && y < 4) ? BLACK : WHITE));
-    v.cone(cx, 0, R, 0.15, 26.0, 29.6, WHITE, 0.6);
-    v.cone(cx, 0, 0.75, 1.15, -1.4, 1.2, NOZ, 1);
-    for (let y = 4; y < 24; y += 6) v.box(side > 0 ? R : R + 0.0, y, -0.3, side > 0 ? cx - R : -R, y + 0.4, 0.3, 0x777777);
-    P['srm' + (side < 0 ? 'L' : 'R')] = v.mesh(mat);
-    P['srm' + (side < 0 ? 'L' : 'R')].userData.nozzles = [[cx, -1.4, 0]];
+    const cx = side * (R * 2 + 0.25);
+    v.cyl(cx, 0, R, 0.2, 24.0, (x, y, z) => {
+      if ([4.6, 9.0, 13.4, 17.8, 22.2].some(j => Math.abs(y - j) < 0.09)) return JOINT;
+      if (y < 2.6 && z > R * 0.55 && Math.abs(x - cx) < 0.8) return ORANGE;
+      return SRM_WHITE;
+    });
+    v.cone(cx, 0, R, 0.95, 24.0, 26.2, SRM_WHITE, 1);                 // conical nose
+    v.cone(cx, 0, 0.95, 0.12, 26.2, 27.3, SRM_WHITE, 0.55);           // rounded tip
+    for (const k of [0, 1, 2]) v.add(cx + side * -0.0, 25.0 + k * 0.32, 1.1, BLACK);   // staging-rocket ports
+    v.cone(cx, 0, 0.8, 1.2, -1.6, 0.2, NOZ, 1);
+    for (let y = 4; y < 22; y += 6) v.box(side > 0 ? R : cx + R, y, -0.25, side > 0 ? cx - R : -R, y + 0.3, 0.25, 0x8d9094);   // attach struts
+    const key = 'srm' + (side < 0 ? 'L' : 'R');
+    P[key] = v.mesh(mat); P[key].userData.nozzles = [[cx, -1.6, 0]];
   }
-  // Centaur D-1T (silver balloon tank) inside the shroud, plus the propulsion module + Voyager on top
+  // ---- Centaur D-1T (stainless "balloon" tank) inside the shroud
   v = new VoxelSet(s);
   v.cyl(0, 0, R, 30.6, 39.6, SILVER);
   v.cone(0, 0, R, 0.6, 39.6, 40.6, SILVER, 2);
-  for (const dx of [-0.5, 0.5]) v.cone(dx, 0, 0.25, 0.42, 29.2, 30.6, NOZ, 1);
-  P.centaur = v.mesh(mat); P.centaur.userData.nozzles = [[-0.5, 29.2, 0], [0.5, 29.2, 0]];
+  for (const dx of [-0.55, 0.55]) v.cone(dx, 0, 0.26, 0.44, 29.3, 30.6, NOZ, 1);
+  P.centaur = v.mesh(mat); P.centaur.userData.nozzles = [[-0.55, 29.3, 0], [0.55, 29.3, 0]];
+  // ---- propulsion module: TE-M-364-4 solid motor + structure (Voyager rides on top)
   v = new VoxelSet(0.1);
-  v.cyl(0, 0, 0.47, 40.8, 41.9, 0x3d3d3d, true);           // TE-M-364-4 (Star 37E)
+  v.cyl(0, 0, 0.47, 40.8, 41.9, 0x3d3d3d, true);
   v.cone(0, 0, 0.18, 0.38, 40.2, 40.8, NOZ, 1);
-  v.cyl(0, 0, 0.95, 41.9, 42.4, 0x6c6c6c);                // PM structure / thrusters ring
+  v.cyl(0, 0, 0.95, 41.9, 42.4, 0x6c6c6c);
   P.pm = v.mesh(mat); P.pm.userData.nozzles = [[0, 40.2, 0]];
-  // Centaur Standard Shroud: two halves, 4.27 m diameter, ogive nose
+  // ---- Centaur Standard Shroud: white ribbed skirt, silver cylinder with panels, white nose; two halves
+  const RS = 2.135;
   for (const half of [-1, 1]) {
     v = new VoxelSet(s);
-    const RS = 2.13, keep = (x) => (half < 0 ? x <= 0.05 : x >= -0.05);
-    const col = (x, y) => (keep(x) ? CSS : null);
-    for (let y = 29.4; y <= 49.4; y += s) {
-      const f = y < 43.5 ? 1 : Math.pow(Math.cos(((y - 43.5) / 5.9) * Math.PI / 2), 0.7);
-      const r = Math.max(0.1, RS * f);
+    const keep = (x) => (half < 0 ? x <= 0.05 : x >= -0.05);
+    for (let y = 29.3; y <= 48.8; y += s) {
+      let r, c;
+      if (y < 31.0) { r = R + 0.12; c = (Math.floor(y / 0.3) % 2) ? RIB : WHITE; }                 // corrugated skirt
+      else if (y < 31.6) { r = R + 0.12 + (RS - R - 0.12) * (y - 31.0) / 0.6; c = WHITE; }
+      else if (y < 43.4) { r = RS; c = SILVER; }
+      else { const f = (y - 43.4) / 5.4; r = Math.max(0.12, RS * (1 - f) ** 0.85 * (1 - 0.15 * f)); c = WHITE; }    // nose cone
       for (let x = -RS; x <= RS; x += s) for (let z = -RS; z <= RS; z += s) {
-        const d = Math.hypot(x, z);
-        if (d <= r + s * 0.5 && d >= r - s * 1.1 && keep(x)) v.add(x, y, z, (y > 31 && y < 31.4) ? 0x999999 : CSS);
+        const d = Math.hypot(x, z); if (d > r + s * 0.5 || d < r - s * 1.1 || !keep(x)) continue;
+        let col = c;
+        if (c === SILVER) {
+          if (Math.abs(y - 35.8) < 0.08 || Math.abs(y - 40.1) < 0.08 || Math.abs(y - 43.3) < 0.1) col = PANEL;
+          if (z > 1.5 && Math.abs(x) < 0.9 && y > 36.6 && y < 37.4 && Math.abs(Math.abs(x) - 0.55) < 0.25) col = 0x6b6f74;  // access doors
+          if (z > 1.5 && Math.abs(x) < 0.2 && y > 34.0 && y < 34.4) col = 0x6b6f74;
+        }
+        v.add(x, y, z, col);
       }
     }
     P['css' + (half < 0 ? 'A' : 'B')] = v.mesh(mat);
@@ -250,17 +284,28 @@ export function buildTitan(mat) {
   return P;
 }
 
-// ---- launch complex (local ENU frame: +y up, +x east, +z south) --------------------------------
+// ---- Launch Complex 41 (local ENU frame: +y up, +x east, +z south) ----------------------------
 export function buildPad(mat) {
   const v = new VoxelSet(2.0);
   for (let x = -300; x <= 300; x += 2) for (let z = -300; z <= 300; z += 2) {
     const d = Math.hypot(x, z);
-    let c = x > 180 ? 0x1f4f7a : (d < 40 ? 0xb9b4a8 : (hash(x, 3, z) > 0.5 ? 0x5f7e45 : 0x6b8a4f));
-    if (Math.abs(z) < 4 && x < 0 && x > -280) c = 0x9a958a;              // rail line toward the integrate building
+    let c = x > 200 ? 0x2a5d7e : (d < 45 ? 0xb3aea2 : (hash(x, 3, z) > 0.5 ? 0x5f7e45 : 0x6b8a4f));
+    if (x > 190 && x <= 200) c = 0xd8cfae;                                           // beach
+    if (Math.abs(z) < 4 && x < 0 && x > -280) c = 0x9a958a;                          // rail line to the VIB
     v.add(x, -1, z, c);
   }
-  v.box(-8, 0, -8, 8, 4, 8, 0x8d8a82);                                     // launch platform
-  v.box(-14, 0, 10, -6, 62, 18, (x, y) => ((Math.floor(y / 6) % 2) ? 0xa63a2a : 0x8a8a8a)); // umbilical tower
-  for (let y = 14; y < 56; y += 10) v.box(-6, y, 12, -2, y + 1.5, 14, 0x777777); // swing arms
-  return v.mesh(mat);
+  const m1 = v.mesh(mat);
+  const w = new VoxelSet(0.5);
+  w.box(-8, 0, -8, 8, 3.5, 8, (x, y) => (y > 3 ? 0x8a877f : 0x6f6c66));            // mobile launch platform
+  w.box(-3, 3.5, -3, 3, 4.0, 3, 0x3a3a3a);                                            // flame opening
+  // umbilical tower: dark corrugated cladding with a black lattice stair frame (west side of the vehicle)
+  w.box(-21, 0, -6, -9, 64, 6, (x, y, z) => ((Math.round(z * 2) % 3 === 0) ? 0x5d636a : 0x70767d));
+  for (let y = 0; y <= 64; y += 4) w.box(-23, y, -7, -21, y + 0.5, 7, 0x151515);
+  for (const zz of [-7, 7]) for (const xx of [-23, -21]) w.box(xx, 0, zz, xx + 0.5, 64, zz + 0.5, 0x151515);
+  // concrete column with cream lattice swing arm reaching the shroud
+  w.box(-9, 0, -2.5, -6.5, 46, 2.5, (x, y, z) => (hash(Math.round(x), Math.round(y), Math.round(z)) > 0.85 ? 0xa9977c : 0xc8bba3));
+  for (let y = 34; y <= 46; y += 2) w.box(-6.5, y, -2, -2.4, y + 0.3, 2, 0xd9cfae);
+  for (const zz of [-2, 2]) w.box(-6.5, 34, zz, -2.4, 46, zz + 0.3, 0xd9cfae);
+  const m2 = w.mesh(mat);
+  const g = new THREE.Group(); g.add(m1, m2); return g;
 }
