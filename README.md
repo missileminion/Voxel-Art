@@ -33,8 +33,13 @@ Every event carries a tag: `sourced` (published), `derived` (computed here), `ap
 
 Apollo 11 at 1:1 real time, from T-60 s on the pad to splashdown, with detailed models (Saturn V, CSM, LM,
 crew, surface experiments), the real Sun direction, shadows, Earth/Moon eclipses and earthshine. The mission
-clock is anchored to the wall clock and keeps running while the page is closed; "Real time" re-syncs it,
-`?t=<MET seconds>` jumps.
+clock is anchored to the wall clock and keeps running while the page is closed; an hour after splashdown
+it starts over from T-60 s. "Real time" re-syncs it, `?t=<MET seconds>` jumps.
+
+Attitude: each vehicle turns toward its commanded attitude (burn attitude 20 min before SPS burns, PTC roll,
+local horizontal, entry attitude) at a limited rate and acceleration; the RCS jets that produce each angular
+acceleration (torque about the centre of mass) are lit, plus deadband pulses in attitude hold, ullage, and the
+report's translation burns along the solved delta-V.
 
 Trajectory (`tools/apollo/`): n-body (Earth, Moon, Sun from DE421; lunar orientation from DE421 librations),
 finite burns with the report's ignition times, durations and delta-V. Fitted to the Mission Report:

@@ -63,45 +63,110 @@ export function makePlume(type) {
 }
 
 // ---------------------------------------------------------------- RCS jets
-// A quad = 4 nozzles (+/-roll and +/-pitch/yaw directions). fire(dirLocal) lights the nozzles whose exhaust points along dirLocal.
-export function makeRcsQuad(radialDir) {
-  const q = new THREE.Group(), up = new THREE.Vector3(0, 1, 0), r = radialDir.clone().normalize(), t = new THREE.Vector3().crossVectors(up, r).normalize();
-  q.userData.jets = [up, up.clone().negate(), t, t.clone().negate()].map(d => {
-    const p = makePlume('rcs'); p.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), d); p.position.copy(d).multiplyScalar(0.18); q.add(p);
+// A quad is a cluster of nozzles; each spec gives its position (in the owner's frame, or the parent's for a sub-assembly)
+// and the exhaust directions of its nozzles. Jets are chosen physically: a rotation lights the nozzles whose thrust
+// (opposite the exhaust) makes a torque about the centre of mass along the commanded angular acceleration; a
+// translation lights the nozzles whose exhaust points opposite the commanded velocity change.
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+export function makeRcsQuad(dirs, offsets) {
+  const q = new THREE.Group();
+  q.userData.jets = dirs.map((d0, i) => {
+    const d = d0.clone().normalize(), p = makePlume('rcs'); p.quaternion.setFromUnitVectors(V(0, -1, 0), d);
+    p.position.copy(d).multiplyScalar(offsets ? offsets[i] : 0.18); q.add(p);
     p.userData.dir = d; p.userData.until = 0; return p;
   });
   return q;
 }
+// Apollo SM quad: two nozzles fire along the long axis (fore/aft, pitch & yaw), two tangentially (roll)
+export function smQuadSpecs(r = 2.2, y = 3.1, phase = 7.25 * Math.PI / 180) {
+  return [0, 1, 2, 3].map(k => { const a = Math.PI / 2 * k + phase, rad = V(Math.cos(a), 0, Math.sin(a)), tan = V(-Math.sin(a), 0, Math.cos(a));
+    return { p: rad.clone().multiplyScalar(r).setY(y), dirs: [V(0, 1, 0), V(0, -1, 0), tan, tan.clone().negate()], off: [0.62, 0.62, 0.36, 0.36] }; });
+}
+// LM ascent-stage quad (45 deg between the body axes): up- and down-firing nozzles plus two side nozzles along the body axes
+export function lmQuadSpecs(points) {
+  return points.map(p => ({ p, dirs: [V(0, 1, 0), V(0, -1, 0), V(Math.sign(p.x), 0, 0), V(0, 0, Math.sign(p.z))], off: [0.3, 0.3, 0.25, 0.25] }));
+}
+// CM reaction control (12 nozzles, approximate layout): pitch and yaw pairs high on the cone, two roll pairs low
+export function cmQuadSpecs() {
+  const out = [];
+  for (const [x, z] of [[0, 0.87], [0, -0.87], [0.87, 0], [-0.87, 0]]) { const rad = V(x, 0, z).normalize().multiplyScalar(0.55);
+    out.push({ p: V(x, 2.5, z), dirs: [V(0, 1, 0).add(rad), V(0, -1, 0).add(rad)], off: [0.12, 0.12] }); }
+  for (const x of [1.57, -1.57]) out.push({ p: V(x, 1.0, 0), dirs: [V(0, 0, 1), V(0, 0, -1)], off: [0.12, 0.12] });
+  return out;
+}
 export class RCS {
-  constructor() { this.quads = []; this.prevQ = new Map(); this.prevW = new Map(); }
-  attach(obj, positions, radialOf = (p) => new THREE.Vector3(p.x, 0, p.z)) {
-    const list = positions.map(p => { const q = makeRcsQuad(radialOf(p)); q.position.copy(p); obj.add(q); return q; });
-    obj.userData.rcsQuads = list; this.quads.push(...list); return list;
+  constructor() { this.quads = []; this.prevQ = new Map(); this.prevW = new Map(); this.lastHold = new Map(); }
+  // owner: object whose attitude the jets act on; parent: where the quads hang (owner or a child of it, offset 'parentOffset')
+  attach(owner, specs, { key = 'rcsQuads', com = V(0, 0, 0), parent = owner, parentOffset = V(0, 0, 0) } = {}) {
+    const list = specs.map(sp => { const q = makeRcsQuad(sp.dirs, sp.off); q.position.copy(sp.p); parent.add(q); q.userData.posObj = sp.p.clone().add(parentOffset); return q; });
+    owner.userData[key] = list; owner.userData[key + 'Com'] = com; this.quads.push(...list); return list;
   }
-  // light the jets on obj whose exhaust points along 'dirWorld' (translation) for 'dur' real seconds
-  pulse(obj, dirWorld, dur = 0.25, nowReal) {
-    if (!obj.userData.rcsQuads) return; const inv = obj.quaternion.clone().invert(), d = dirWorld.clone().applyQuaternion(inv).normalize();
-    for (const q of obj.userData.rcsQuads) for (const j of q.userData.jets) if (j.userData.dir.dot(d) > 0.7) j.userData.until = Math.max(j.userData.until, nowReal + dur);
+  // translation: light the jets whose exhaust points along 'dirWorld'
+  pulse(obj, dirWorld, dur = 0.25, nowReal, key = 'rcsQuads') {
+    const qs = obj.userData[key]; if (!qs) return; const d = dirWorld.clone().applyQuaternion(obj.quaternion.clone().invert()).normalize();
+    // jets along the body axis nearest the commanded direction (off-axis translations combine two or three axes)
+    for (const q of qs) for (const j of q.userData.jets) { const c = j.userData.dir.dot(d); if (c > 0.45) j.userData.until = Math.max(j.userData.until, nowReal + dur * Math.min(1, c / 0.9)); }
   }
-  // fire attitude jets from the change in angular velocity (couples on opposite quads)
-  attitude(obj, simDt, nowReal, enabled) {
-    const id = obj.uuid, q = obj.quaternion.clone(), pq = this.prevQ.get(id); this.prevQ.set(id, q);
-    if (!pq || !enabled || simDt <= 0 || simDt > 30) { this.prevW.set(id, new THREE.Vector3()); return; }
-    const dq = q.clone().multiply(pq.clone().invert()); if (dq.w < 0) { dq.x *= -1; dq.y *= -1; dq.z *= -1; dq.w *= -1; }
-    const ang = 2 * Math.acos(Math.min(1, dq.w)), ax = new THREE.Vector3(dq.x, dq.y, dq.z); if (ax.lengthSq() > 1e-12) ax.normalize();
-    const w = ax.multiplyScalar(ang / simDt), pw = this.prevW.get(id) || w.clone(); this.prevW.set(id, w.clone());
-    const alpha = w.clone().sub(pw).divideScalar(simDt); if (alpha.length() < 2e-4) return;     // rad/s^2 threshold
-    const aLocal = alpha.applyQuaternion(obj.quaternion.clone().invert());
-    if (!obj.userData.rcsQuads) return;
-    for (const qd of obj.userData.rcsQuads) for (const j of qd.userData.jets) {
-      const thrust = j.userData.dir.clone().negate(), torque = new THREE.Vector3().crossVectors(qd.position, thrust);
-      if (torque.normalize().dot(aLocal.clone().normalize()) > 0.6) j.userData.until = Math.max(j.userData.until, nowReal + 0.18);
-    }
+  // rotation: light the jets whose torque about the centre of mass lies along the angular acceleration (body frame)
+  torque(obj, alphaLocal, dur, nowReal, key = 'rcsQuads') {
+    const qs = obj.userData[key]; if (!qs || alphaLocal.lengthSq() === 0) return; const a = alphaLocal.clone().normalize(), com = obj.userData[key + 'Com'];
+    for (const q of qs) { const r = q.userData.posObj.clone().sub(com);
+      for (const j of q.userData.jets) { const tq = new THREE.Vector3().crossVectors(r, j.userData.dir.clone().negate());
+        if (tq.lengthSq() > 1e-6 && tq.normalize().dot(a) > 0.55) j.userData.until = Math.max(j.userData.until, nowReal + dur); } }
+  }
+  // scripted rotations (transposition & docking): angular acceleration from successive attitudes
+  attitude(obj, simDt, nowReal, enabled, key = 'rcsQuads') {
+    const id = obj.uuid + key, q = obj.quaternion.clone(), pq = this.prevQ.get(id); this.prevQ.set(id, q);
+    if (!pq || !enabled || simDt <= 0 || simDt > 30) { this.prevW.set(id, null); return; }
+    const w = rotVec(q.clone().multiply(pq.clone().invert())).divideScalar(simDt), pw = this.prevW.get(id); this.prevW.set(id, w.clone());
+    if (!pw) return; const alpha = w.clone().sub(pw).divideScalar(simDt); if (alpha.length() < 4e-4) return;
+    this.torque(obj, alpha.applyQuaternion(obj.quaternion.clone().invert()), 0.15, nowReal, key);
+  }
+  // attitude hold inside a deadband: occasional minimum-impulse couples about a random axis
+  hold(obj, simDt, nowReal, ratePerSimS, key = 'rcsQuads') {
+    if (simDt <= 0 || ratePerSimS <= 0) return; const id = obj.uuid + key, last = this.lastHold.get(id) || 0;
+    if (nowReal - last < 0.6 || Math.random() > 1 - Math.exp(-ratePerSimS * simDt)) return; this.lastHold.set(id, nowReal);
+    const ax = [V(1, 0, 0), V(0, 1, 0), V(0, 0, 1)][Math.floor(Math.random() * 3)].multiplyScalar(Math.random() < 0.5 ? -1 : 1);
+    this.torque(obj, ax, 0.08 + Math.random() * 0.08, nowReal, key);
   }
   update(nowReal) {
     for (const q of this.quads) for (const j of q.userData.jets) {
-      const on = nowReal < j.userData.until; j.userData.set(on, on ? 0.75 + 0.25 * Math.random() : 0, 1, nowReal);
+      const on = nowReal < j.userData.until && q.parent && q.parent.visible; j.userData.set(on, on ? 0.75 + 0.25 * Math.random() : 0, 1, nowReal);
     }
+  }
+}
+function rotVec(dq) {   // quaternion -> rotation vector (axis * angle)
+  const q = dq.clone(); if (q.w < 0) { q.x = -q.x; q.y = -q.y; q.z = -q.z; q.w = -q.w; }
+  const s = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z); if (s < 1e-12) return V(0, 0, 0);
+  const ang = 2 * Math.atan2(s, q.w); return V(q.x, q.y, q.z).multiplyScalar(ang / s);
+}
+// Attitude control: the vehicle turns toward its commanded attitude at a limited rate and angular acceleration
+// (bang-coast-bang, as the autopilot did), tracking the target's own rotation. step() returns the body-frame angular
+// acceleration it applied, which is what the jets have to produce.
+export class Slew {
+  constructor(rateDeg, accDeg) { this.wmax = rateDeg * Math.PI / 180; this.acc = accDeg * Math.PI / 180; this.q = null; this.qT = null; this.t = null; this.w = V(0, 0, 0); }
+  snap(q, t) { this.q = q.clone(); this.qT = q.clone(); this.t = t; this.w.set(0, 0, 0); this.fresh = true; this.aAvg = V(0, 0, 0); }
+  step(qT, t) {
+    const out = { q: null, alpha: V(0, 0, 0), firing: false };
+    const h = this.t === null ? -1 : t - this.t;
+    if (!this.q || h < 0 || h > 120) { this.snap(qT, t); out.q = this.q.clone(); return out; }
+    if (h === 0) { out.q = this.q.clone(); return out; }
+    let wT = rotVec(qT.clone().multiply(this.qT.clone().invert())).divideScalar(h); if (wT.length() > 0.05) wT.set(0, 0, 0);   // target jumped (mode change): no feed-forward
+    if (this.fresh) { this.fresh = false; this.w.copy(wT); this.q = qT.clone(); this.qT = qT.clone(); this.t = t; out.q = this.q.clone(); return out; }   // first step after a snap: adopt the target's rate
+    const n = Math.min(240, Math.ceil(h / 0.25)), hs = h / n, dwSum = V(0, 0, 0), qa = this.qT.clone();
+    for (let i = 1; i <= n; i++) {
+      const qTi = qa.clone().slerp(qT, i / n), e = rotVec(qTi.clone().multiply(this.q.clone().invert())), th = e.length();
+      const sp = th < 0.003 ? th / 3 : Math.min(this.wmax, 0.9 * Math.sqrt(2 * this.acc * th));
+      const wDes = wT.clone().add(th > 1e-9 ? e.multiplyScalar(sp / th) : V(0, 0, 0));
+      const dw = wDes.sub(this.w), lim = this.acc * hs; if (dw.length() > lim) dw.setLength(lim);
+      this.w.add(dw); dwSum.add(dw);
+      const ang = this.w.length() * hs; if (ang > 0) this.q.premultiply(new THREE.Quaternion().setFromAxisAngle(this.w.clone().normalize(), ang)).normalize();
+    }
+    this.qT = qT.clone(); this.t = t;
+    out.q = this.q.clone(); out.alpha = dwSum.divideScalar(h).applyQuaternion(this.q.clone().invert());
+    this.aAvg = (this.aAvg || V(0, 0, 0)).lerp(out.alpha, 1 - Math.exp(-h / 0.3));   // smoothed: frame-time noise never fires a jet
+    out.firing = this.aAvg.length() > this.acc * 0.35; out.alpha = this.aAvg.clone();
+    return out;
   }
 }
 

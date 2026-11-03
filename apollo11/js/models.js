@@ -195,7 +195,7 @@ export function buildCSM(underCover = false) {
   g.add(cyl(1.4, 1.95, -0.05, 0.02, m.darkMetal, 72));
   // RCS quads (4) with nozzles
   for (let k = 0; k < 4; k++) {
-    const a = TAU * k / 4 + TAU / 16, q = new THREE.Group();
+    const a = TAU * k / 4 + 7.25 * Math.PI / 180, q = new THREE.Group();   // quads sit 7.25 deg off the body axes
     q.add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.9, 0.24), m.alu));
     for (const [x, y, rz] of [[0, 0.62, 0], [0, -0.62, Math.PI], [0.36, 0, -Math.PI / 2], [-0.36, 0, Math.PI / 2]]) {
       const n = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.25, 12, 1, true), m.darkMetal); n.position.set(x, y, 0); n.rotation.z = rz; q.add(n);

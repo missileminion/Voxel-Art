@@ -37,15 +37,24 @@ def step_default(t, y):
 ALT = PchipInterpolator([0, 30, 60, 90, 120, 161.7, 200, 300, 400, 548, 600, T_INS],
                         [0, 0.008, 0.04, 0.10, 0.18, 0.36, 0.51, 0.76, 0.89, 0.955, 0.975, 1.0])
 r0 = np.linalg.norm(pad_eq)
+def _fixed_to_inertial(t):   # Earth-fixed -> equatorial J2000 at MET t (same model as geo.site_vec_eq)
+    return geo.precession(jd(t)).T @ geo.R3(-geo.gmst(JD_UTC0 + t / 86400))
+_pf = _fixed_to_inertial(T_LIFT).T @ (pad_eq / r0)                       # pad direction, Earth-fixed
+import run as _RN
+_ef = _fixed_to_inertial(T_INS).T @ (_RN.r_ins / np.linalg.norm(_RN.r_ins))     # insertion point direction, Earth-fixed
+# downrange fraction: ~0 for the tower-clearing climb, ~3 km at 60 s, ~94 km at S-IC cutoff (Apollo 11 51 nmi)
+DR = PchipInterpolator([0, 10, 20, 30, 60, 90, 120, 161.7, 200, 300, 400, 548, 600, T_INS],
+                       [0, 0, 1e-5, 1.2e-4, 1.1e-3, 4.5e-3, 1.2e-2, 0.035, 0.062, 0.15, 0.28, 0.55, 0.67, 1.0])
+_S = math.acos(float(np.clip(_pf @ _ef, -1, 1)))
 def ascent_pos(t):
+    # defined over the rotating Earth, so the vehicle rises straight off the pad (it already carries the
+    # pad's eastward velocity) and pitches downrange along the ground track to the solver's insertion point
     tau = min(max(t / T_INS, 0), 1)
     r = r0 + (R_PARK - r0) * float(ALT(min(max(t, 0), T_INS)))
-    th = TH_INS * tau ** 2
-    O = r * (math.cos(th) * xh + math.sin(th) * yh)
-    P = geo.site_vec_eq(PAD_LAT, PAD_LON, JD_UTC0 + t / 86400, jd(t))
-    w = min(1, max(0, tau / 0.12)); w = w * w * (3 - 2 * w)
-    d = (1 - w) * P / np.linalg.norm(P) + w * O / np.linalg.norm(O)
-    return geo.ecl_from_eq(d / np.linalg.norm(d) * r)
+    a = _S * float(DR(min(max(t, 0), T_INS)))
+    d = (math.sin(_S - a) * _pf + math.sin(a) * _ef) / math.sin(_S)
+    return geo.ecl_from_eq(_fixed_to_inertial(t) @ (d / np.linalg.norm(d) * r))
+log('ascent ground track %.0f km to insertion, %.1f km at S-IC cutoff' % (_S * r0, _S * r0 * float(DR(161.7))))
 csm_nodes = []
 for t in np.arange(-120.0, T_INS, 1.0):
     p = ascent_pos(t); v = (ascent_pos(t + 0.25) - ascent_pos(t - 0.25)) / 0.5
@@ -136,6 +145,9 @@ for line in open(TIMELINE, encoding='utf-8'):
     m = re.match(r'^(102):(\d{2}):(\d{2}\.\d+)\s+([+-]\d+\.\d+)\s+([+-]\d+\.\d+)\s+([+-]\d+\.\d+)\s+(\d+\.\d+)$', line.strip())
     if m: gim.append([int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)), float(m.group(4)), float(m.group(5)), float(m.group(6)), float(m.group(7))])
 
+# delta-V directions of the impulsive RCS burns (unit vectors, scene frame) so the viewer fires the right jets
+_un = lambda a: [float(x) for x in (np.asarray(a) / np.linalg.norm(a))]
+dvdir = dict(CSI=_un(frame(T_CSI, lmt(T_CSI - 0.5), 'moon')[0]), CDH=_un(MS.dv_cdh), TPI=_un(MS.dv_tpi), TPF=_un(MS.dv_tpf))
 meta = dict(jd_utc0=JD_UTC0, utc0='1969-07-16T13:32:00Z', tracks=index, bodies=bidx, moon_q=dict(t0=-3600, dt=600.0, q=mq),
             site_bf=list(SITE_BF), site_lat=0.67408, site_lon=23.47297, pad=[PAD_LAT, PAD_LON],
             t=dict(liftoff=0.6, ins=T_INS, tli=T_TLI, tde=met(3, 17, 4.6), dock1=met(3, 24, 3.1), eject=met(4, 16, 59.1), evasive=T_EVA_SEP,
@@ -147,6 +159,6 @@ meta = dict(jd_utc0=JD_UTC0, utc0='1969-07-16T13:32:00Z', tracks=index, bodies=b
             burns=dict(TLI=[T_TLI, D_TLI], LOI1=[T_LOI1, D_LOI1], LOI2=[T_LOI2, D_LOI2], DOI=[T_DOI, 30.0], PDI=[T_PDI, T_LAND - T_PDI + 1.5],
                        ASC=[T_ASC, D_ASC], TEI=[T_TEI, D_TEI], MCC2=[T_MCC2, 3.1], MCC5=[T_MCC5, 11.2], SEP=[T_SEP, 5.2], EVA=[T_EVA_SEP, 2.9],
                        CSI=[T_CSI, 47.0], CDH=[T_CDH, 17.8], TPI=[T_TPI, 22.7], TPF=[T_TPF, 28.4], FSEP=[T_FSEP, 7.2]),
-            thrust=thrust, events=events, gimbal=gim, entry_bank=T['bank'], log=LOG)
+            thrust=thrust, dvdir=dvdir, events=events, gimbal=gim, entry_bank=T['bank'], log=LOG)
 json.dump(meta, open(OUT + 'apollo.json', 'w'), separators=(',', ':'))
 log('wrote apollo.json with %d events' % len(events))

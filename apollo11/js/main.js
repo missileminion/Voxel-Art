@@ -2,7 +2,7 @@
 import * as THREE from '../../app/js/vendor/three.module.js';
 import { Track, Uniform, loadBin, v3 } from '../../app/js/data.js';
 import { materials, buildSaturnV, buildCSM, buildSurfaceKit, buildAstronaut, loadNasaLM } from './models.js';
-import { makePlume, RCS, makeEntryGlow, makeChutes } from './fx.js';
+import { makePlume, RCS, Slew, smQuadSpecs, lmQuadSpecs, cmQuadSpecs, makeEntryGlow, makeChutes } from './fx.js';
 
 const $ = (id) => document.getElementById(id);
 const store = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -154,6 +154,7 @@ const lunarGround = new THREE.Group(); scene.add(lunarGround);
 }
 // Launch Complex 39A: pad, mobile launcher + red launch umbilical tower, ground disc textured from the Earth map
 const padGroup = new THREE.Group(); scene.add(padGroup);
+const swingArms = [];   // service arms swing back to the tower at liftoff
 {
   const m = materials();
   const ground = new THREE.Mesh(new THREE.CircleGeometry(3000, 96), new THREE.MeshStandardMaterial({ color: 0x5f7a46, roughness: 1 })); ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; padGroup.add(ground);
@@ -164,7 +165,7 @@ const padGroup = new THREE.Group(); scene.add(padGroup);
   const tower = new THREE.Group(); tower.position.set(-24, 8.6, 0);
   for (const [x, z] of [[-6, -6], [6, -6], [-6, 6], [6, 6]]) { const c = new THREE.Mesh(new THREE.BoxGeometry(0.9, 120, 0.9), red); c.position.set(x, 60, z); tower.add(c); }
   for (let y = 0; y < 120; y += 6) for (const [w, d, x, z] of [[12, 0.5, 0, -6], [12, 0.5, 0, 6], [0.5, 12, -6, 0], [0.5, 12, 6, 0]]) { const b = new THREE.Mesh(new THREE.BoxGeometry(w, 0.5, d), red); b.position.set(x, y, z); tower.add(b); }
-  for (const y of [18, 46, 60, 74, 86, 96, 102]) { const arm = new THREE.Mesh(new THREE.BoxGeometry(14, 1.6, 2.2), red); arm.position.set(13, y, 0); tower.add(arm); }
+  for (const y of [18, 46, 60, 74, 86, 96, 102]) { const piv = new THREE.Group(); piv.position.set(7.4, y, 0); const arm = new THREE.Mesh(new THREE.BoxGeometry(14, 1.6, 2.2), red); arm.position.set(5.6, 0, 0); piv.add(arm); tower.add(piv); swingArms.push(piv); }
   const crane = new THREE.Mesh(new THREE.BoxGeometry(12, 1.5, 1.5), red); crane.position.set(4, 121, 0); tower.add(crane);
   tower.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   padGroup.add(tower);
@@ -226,14 +227,19 @@ const PL = {
   les: [mk('solid', cover, [0, 6.4, 0], true)],
 };
 const plasma = makeEntryGlow(); csm.userData.cm.add(plasma);
-// RCS: four quads on the service module (radius 2.05 m, 3.1 m up) and four on the LM ascent stage
+// RCS: four quads on the service module (7.25 deg off the body axes, near the CSM centre of mass), the CM's 12 entry
+// jets, and four quads on the LM ascent stage. Centres of mass are approximate.
 const rcs = new RCS();
-rcs.attach(csm, [0, 1, 2, 3].map(k => { const a = Math.PI * 2 * k / 4 + Math.PI / 8; return new THREE.Vector3(Math.cos(a) * 2.2, 3.1, Math.sin(a) * 2.2); }));
-rcs.attach(lm.userData.asc, lm.userData.rcs); lm.userData.rcsQuads = lm.userData.asc.userData.rcsQuads;
+rcs.attach(csm, smQuadSpecs(2.2, 3.1), { com: new THREE.Vector3(0, 3.1, 0) });
+rcs.attach(csm, cmQuadSpecs(), { key: 'cmQuads', parent: csm.userData.cm, parentOffset: new THREE.Vector3(0, 4.25, 0), com: new THREE.Vector3(0, 5.45, 0) });
+rcs.attach(lm, lmQuadSpecs(lm.userData.rcs), { parent: lm.userData.asc, com: new THREE.Vector3(0, 4.2, 0) });
+// attitude autopilots: CSM manoeuvres at 0.5 deg/s, LM at 1 deg/s (angular accelerations approximate)
+const slewC = new Slew(0.5, 0.25), slewL = new Slew(1.0, 0.8);
+let attC = null, attL = null, inPTC = false;
 // the jettisoned service module (drifts away firing its -X jets after CM/SM separation)
 const smJet = buildCSM(); smJet.userData.cm.visible = false; scene.add(smJet); smJet.visible = false;
 smJet.traverse(c => { if (c.material?.isMeshStandardMaterial) { c.material.envMap = craftEnv; craftMats.add(c.material); } });
-rcs.attach(smJet, [0, 1, 2, 3].map(k => { const a = Math.PI * 2 * k / 4 + Math.PI / 8; return new THREE.Vector3(Math.cos(a) * 2.2, 3.1, Math.sin(a) * 2.2); }));
+rcs.attach(smJet, smQuadSpecs(2.2, 3.1), { com: new THREE.Vector3(0, 3.1, 0) });
 
 // ---------------------------------------------------------------- mission clock: real time 1:1, anchored so it keeps running while the page is closed
 const st = { speed: 1, playing: true, follow: 'auto', zoom: 1, yaw: 0, pitch: 0 };
@@ -242,7 +248,8 @@ const q = new URLSearchParams(location.search);
 if (q.has('t')) anchor = { wall: Date.now(), met: parseFloat(q.get('t')) };
 if (!anchor || !(anchor.met > -600)) anchor = { wall: Date.now(), met: -60 };
 let met = anchor.met + (Date.now() - anchor.wall) / 1000;
-if (met > TT.splash + 3600) met = TT.splash + 3600;
+const T_END = TT.splash + 3600;                       // one hour after splashdown the mission starts over from T-60 s
+if (met > T_END) met = -60;
 function reanchor() { anchor = { wall: Date.now(), met }; store.set('a11.anchor', anchor); }
 reanchor();
 
@@ -255,6 +262,7 @@ function thrustDir(name, t) {
   return new THREE.Vector3(b.v[i * 3], b.v[i * 3 + 1], b.v[i * 3 + 2]);
 }
 function burning(name, t) { const b = meta.burns[name]; return b && t >= b[0] && t <= b[0] + b[1]; }
+function burnWindow(name, t, lead) { const b = meta.burns[name]; return b && t >= b[0] - lead && t <= b[0] + b[1]; }   // manoeuvre to burn attitude 'lead' s early
 function quatFromAxes(yAxis, zHint) {     // object +y along yAxis, +z toward zHint
   const y = yAxis.clone().normalize(), x = new THREE.Vector3().crossVectors(y, zHint); if (x.lengthSq() < 1e-8) x.set(1, 0, 0).cross(y); x.normalize();
   const z = new THREE.Vector3().crossVectors(x, y); return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
@@ -320,13 +328,13 @@ renderer.domElement.addEventListener('pointerdown', (e) => { drag = [e.clientX, 
 addEventListener('pointerup', () => { drag = null; });
 addEventListener('pointermove', (e) => { if (!drag) return; st.yaw += (e.clientX - drag[0]) * 0.005; st.pitch = Math.max(-1.3, Math.min(1.3, st.pitch + (e.clientY - drag[1]) * 0.004)); drag = [e.clientX, e.clientY]; });
 renderer.domElement.addEventListener('wheel', (e) => { st.zoom = Math.max(0.2, Math.min(30, st.zoom * Math.exp(e.deltaY * 0.001))); e.preventDefault(); }, { passive: false });
-function metStr(t) { const s = Math.abs(t), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (t < 0 ? '−' : '') + String(h).padStart(3, '0') + ':' + String(m).padStart(2, '0') + ':' + x.toFixed(0).padStart(2, '0'); }
+function metStr(t) { const s = Math.floor(Math.abs(t) + (t < 0 ? 0.999 : 0)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (t < 0 ? '−' : '') + String(h).padStart(3, '0') + ':' + String(m).padStart(2, '0') + ':' + String(x).padStart(2, '0'); }
 let toastT = 0, lastEv = EVENTS.findIndex(e => e.t > met) - 1;
 function toast(e) { $('toast').innerHTML = `<b>${e.title}</b> <span class="tag ${e.tag}">${e.tag}</span><br>${e.text || ''}`; $('toast').classList.add('show'); toastT = 8; }
 
 // ---------------------------------------------------------------- frame
 const clock = new THREE.Clock();
-const camU = new THREE.Vector3(0, 0, 1);
+const camU = new THREE.Vector3(0, 0, 1); let camInit = true, camT = 0;
 function place(obj, pKm, originKm) { obj.position.set((pKm[0] - originKm[0]) * 1000, (pKm[1] - originKm[1]) * 1000, (pKm[2] - originKm[2]) * 1000); }
 function bodyPlace(obj, centerKm, radiusKm, originKm, f) {
   const rel = v3.sub(centerKm, originKm), D = v3.len(rel) * 1000, R = radiusKm * 1000, u = v3.scale(rel, 1 / v3.len(rel));
@@ -336,7 +344,7 @@ function bodyPlace(obj, centerKm, radiusKm, originKm, f) {
 function frame() {
   const dt = Math.min(clock.getDelta(), 0.1);
   if (st.playing) met += dt * st.speed;
-  met = Math.min(met, TT.splash + 3600);
+  if (met > T_END) { met = -60; reanchor(); lastEv = -1; }
   const t = met;
   // --- which vehicle is followed
   const lmActive = t >= TT.undock && t < TT.dock2 + 120;
@@ -377,6 +385,8 @@ function frame() {
     const pw = v3.add([0, 0, 0], mv(M, PAD)); place(padGroup, pw, O);
     const [la, lo] = PADLL, up = toV(mv(M, [Math.cos(la) * Math.cos(lo), Math.cos(la) * Math.sin(lo), Math.sin(la)])), east = toV(mv(M, [-Math.sin(lo), Math.cos(lo), 0]));
     padGroup.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(east, up, new THREE.Vector3().crossVectors(east, up)));
+    padGroup.position.add(east.clone().multiplyScalar(3.54));   // centre the mobile launcher under the vehicle (Earth-rotation rounding between solver and viewer, ~1e-6 rad)
+    for (let i = 0; i < swingArms.length; i++) { const k = Math.max(0, Math.min(1, (t - (i === 5 ? -300 : 0.1)) / 8)); swingArms[i].rotation.y = (k * k * (3 - 2 * k)) * (i === 5 ? 1.45 : 1.5); }
   }
   const site = siteWorld(t), sb = siteBasis(t), altSite = v3.len(v3.sub(O, moonS.p)) - (R_M - 1.93);
   const dSite = v3.len(v3.sub(O, site));
@@ -423,7 +433,7 @@ function frame() {
   }
   // --- CSM placement & attitude
   const Xc = S('csm', t);
-  let qC = null, csmOff = new THREE.Vector3();
+  let qC = null, csmOff = new THREE.Vector3(); attC = null; attL = null;
   if (inStack) {   // CSM + LM ride on the stack
     csm.position.copy(stack.position).add(new THREE.Vector3(0, 94.2, 0).applyQuaternion(stack.quaternion)); csm.quaternion.copy(stack.quaternion);
     lm.position.copy(stack.position).add(new THREE.Vector3(0, 85.0, 0).applyQuaternion(stack.quaternion)); lm.quaternion.copy(stack.quaternion);
@@ -436,7 +446,7 @@ function frame() {
       if (t < tdeDock) {
         const u = (t - tdeStart) / (tdeDock - tdeStart);
         // separate and coast out ~16 m, pitch 180 deg, then close in until the probe meets the LM drogue (CSM origin at 99.7 m)
-        flip = Math.max(0, Math.min(1, (u - 0.35) / 0.25)); flip = flip * flip * (3 - 2 * flip);
+        flip = trap(Math.max(0, Math.min(1, (u - 0.35) / 0.25)), 0.12);   // accelerate, coast, brake (autopilot rate profile)
         dist = u < 0.35 ? 94.2 + u / 0.35 * 16 : u < 0.6 ? 110.2 : 110.2 - Math.min(1, (u - 0.6) / 0.38) * (110.2 - DOCKY);
       } else { dist = DOCKY + (t > TT.eject ? Math.min(t - TT.eject, 400) * 0.3 : 0); flip = 1; }
       const qf = qs.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), flip * Math.PI));
@@ -444,15 +454,16 @@ function frame() {
       if (t >= tdeDock) { lm.position.copy(base).add(ax.clone().multiplyScalar(85.0 + (t > TT.eject ? Math.min(t - TT.eject, 400) * 0.3 : 0))); lm.quaternion.copy(qs); }
     } else {
       const docked = t < TT.undock || (t > TT.dock2 && t < TT.jet);
-      if (burning('LOI1', t)) qC = quatFromAxes(thrustDir('LOI1', t), toV(Xc.p).sub(toV(moonS.p)).negate());
-      else if (burning('LOI2', t)) qC = quatFromAxes(thrustDir('LOI2', t), toV(Xc.p).sub(toV(moonS.p)).negate());
-      else if (burning('TEI', t)) qC = quatFromAxes(thrustDir('TEI', t), toV(Xc.p).sub(toV(moonS.p)).negate());
-      else if ((t > TT.eject + 3 * 3600 && t < TT.loi1 - 2 * 3600) || (t > TT.tei + 2 * 3600 && t < TT.cmsm - 1800)) qC = ptcQuat(t, Xc);
+      const bn = ['LOI1', 'LOI2', 'TEI'].find(b => burnWindow(b, t, 1200));
+      inPTC = false;
+      if (bn) qC = quatFromAxes(thrustDir(bn, Math.max(t, meta.burns[bn][0])), toV(Xc.p).sub(toV(moonS.p)).negate());
+      else if ((t > TT.eject + 3 * 3600 && t < TT.loi1 - 2 * 3600) || (t > TT.tei + 2 * 3600 && t < TT.cmsm - 1800)) { qC = ptcQuat(t, Xc); inPTC = true; }
       else if (t > TT.loi1 && t < TT.tei) qC = localHorizontal(t, Xc, moonS.p, false);
-      else if (t >= TT.ei) {   // entry: heat shield forward, ~20 deg trim, lift vector banked
+      else if (t >= TT.cmsm + 60) {   // entry attitude (CM manoeuvres after separating from the SM): heat shield forward, ~20 deg trim
         const v = toV(Xc.v).sub(new THREE.Vector3(0, 0, 0)), up = toV(Xc.p).normalize();
         qC = quatFromAxes(v.clone().negate(), up).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.35));
       } else qC = quatFromAxes(toV(Xc.v), toV(Xc.p).negate());
+      attC = slewC.step(qC, t); qC = attC.q;
       csm.quaternion.copy(qC);
       if (docked) {   // LM docked ahead of the CM: probe-drogue, LM upside down relative to the CSM
         lm.quaternion.copy(qC).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI));
@@ -461,6 +472,7 @@ function frame() {
       }
     }
   }
+  if (!attC) slewC.snap(csm.quaternion, t);
   if (burning('LOI1', t) || burning('LOI2', t) || burning('TEI', t) || burning('MCC2', t) || burning('EVA', t)) PL.sps[0].userData.on = true;
   // --- LM after undocking (descent, surface, ascent, rendezvous, jettison)
   const lmFree = t >= TT.undock && !(t > TT.dock2 && t < TT.jet);
@@ -495,11 +507,14 @@ function frame() {
       const bl = Math.min(1, (t - TT.tpf) / 90); lm.position.lerp(target, bl * bl * (3 - 2 * bl));
       const qd = quatFromAxes(axis.clone().negate(), new THREE.Vector3(1, 0, 0).applyQuaternion(csm.quaternion));
       ql = ql.clone().slerp(qd, Math.min(1, (t - TT.tpf) / 240));
-      if (Math.abs(t - tAp) < 1.5 * st.speed || Math.abs(t - (TT.dock2 - 40)) < 1.5 * st.speed) rcs.pulse(csm, axis.clone().negate(), 1.2, timeNow);   // start the approach / brake
+      const nr = (tx) => Math.abs(t - tx) < Math.max(1.5, dt * st.speed);
+      if (st.speed <= 60) { if (nr(tAp)) rcs.pulse(lm, axis, 1.2, timeNow);                     // LM starts closing on the CSM (exhaust away from it)
+        if (nr(TT.dock2 - 40)) rcs.pulse(lm, axis.clone().negate(), 1.2, timeNow); }           // braking before contact
     }
+    if (t >= TT.land && t < TT.asc) slewL.snap(ql, t); else { attL = slewL.step(ql, t); ql = attL.q; }
     lm.quaternion.copy(ql);
     lm.userData.desc.visible = t < TT.asc;
-  }
+  } else slewL.snap(lm.quaternion, t);
   // descent stage stays at Tranquility Base after liftoff
   if (t >= TT.asc && lunarGround.visible) {
     if (lmDescent.parent === lm) { scene.add(lmDescent); }
@@ -547,21 +562,38 @@ function frame() {
   }
   // --- RCS: attitude jets when a vehicle's rotation rate changes; ullage before SPS burns; the report's RCS burns
   const rcsOk = st.speed <= 60;
-  rcs.attitude(csm, st.playing ? dt * st.speed : 0, timeNow, rcsOk && !inStack);
-  rcs.attitude(lm.userData.asc.parent === lm ? lm : lm, st.playing ? dt * st.speed : 0, timeNow, rcsOk && lmFree);
+  const simDt = st.playing ? dt * st.speed : 0, spsOn = PL.sps[0].userData.on, cmKey = cmOnly ? 'cmQuads' : 'rcsQuads';
   const fwd = new THREE.Vector3(0, 1, 0).applyQuaternion(csm.quaternion);
-  for (const b of ['LOI1', 'LOI2', 'TEI', 'MCC2', 'EVA']) { const w = meta.burns[b]; if (t > w[0] - 15 && t < w[0] + 1) rcs.pulse(csm, fwd.clone().negate(), 0.3, timeNow); }   // +X ullage
-  if (burning('SEP', t) || burning('FSEP', t) || burning('MCC5', t)) rcs.pulse(csm, fwd.clone().negate(), 0.3, timeNow);
-  if (t > TT.tde && t < TT.tde + 7.1) rcs.pulse(csm, fwd.clone().negate(), 0.3, timeNow);                              // separation from the S-IVB
-  const lmUp = new THREE.Vector3(0, 1, 0).applyQuaternion(lm.quaternion);
-  for (const b of ['CSI', 'CDH', 'TPI', 'TPF']) if (burning(b, t)) rcs.pulse(lm, lmUp.clone().negate().applyAxisAngle(new THREE.Vector3(1, 0, 0).applyQuaternion(lm.quaternion), Math.PI / 2), 0.3, timeNow);
+  const near = (tx) => Math.abs(t - tx) < Math.max(1.5, simDt);
+  if (rcsOk && t < TT.drogue) {
+    // attitude: couples at the start and end of every autopilot manoeuvre; SPS burns are steered by the engine gimbal instead
+    if (attC && attC.firing && !spsOn) rcs.torque(csm, attC.alpha, 0.14, timeNow, cmKey);
+    if (!attC && !inStack) rcs.attitude(csm, simDt, timeNow, true);                     // scripted transposition
+    const lmCrewed = t < TT.jet;                                                            // the jettisoned ascent stage drifts uncontrolled
+    if (attL && attL.firing && lmCrewed) rcs.torque(lm, attL.alpha, 0.14, timeNow);
+    // attitude hold: occasional deadband pulses (none in passive thermal control, which is a free roll)
+    if (attC && !attC.firing && !spsOn && !inPTC && !cmOnly) rcs.hold(csm, simDt, timeNow, 1 / 90);
+    if (cmOnly) rcs.hold(csm, simDt, timeNow, t > TT.ei ? 1 / 3 : 1 / 45, 'cmQuads');   // CM rate damping and bank control during entry
+    if (attL && !attL.firing && lmCrewed) rcs.hold(lm, simDt, timeNow, (t >= TT.asc && t < TT.asc_end) ? 1 / 1.2 : (t >= TT.pdi && t < TT.land) ? 1 / 4 : 1 / 90);   // APS has no gimbal: RCS works constantly
+    // translations
+    for (const b of ['LOI1', 'LOI2', 'TEI', 'MCC2', 'EVA']) { const w = meta.burns[b]; if (t > w[0] - 15 && t < w[0] + 1) rcs.pulse(csm, fwd.clone().negate(), 0.3, timeNow); }   // +X ullage before SPS ignition
+    if (burning('SEP', t) || burning('FSEP', t) || burning('MCC5', t)) rcs.pulse(csm, fwd.clone().negate(), 0.3, timeNow);
+    if (t > TT.tde && t < TT.tde + 7.1) rcs.pulse(csm, fwd.clone().negate(), 0.3, timeNow);                              // +X away from the S-IVB
+    { const u0 = tdeStart, span = tdeDock - tdeStart;                                                                     // transposition: stop, close, brake
+      if (near(u0 + 0.35 * span)) rcs.pulse(csm, fwd.clone(), 0.5, timeNow);
+      if (near(u0 + 0.6 * span)) rcs.pulse(csm, fwd.clone().negate(), 0.5, timeNow);
+      if (near(u0 + 0.98 * span)) rcs.pulse(csm, fwd.clone(), 0.5, timeNow); }
+    for (const b of ['CSI', 'CDH', 'TPI', 'TPF']) if (burning(b, t) && meta.dvdir && meta.dvdir[b]) rcs.pulse(lm, toV(meta.dvdir[b]).negate(), 0.3, timeNow);   // LM RCS burns along the solved delta-V
+  }
   rcs.update(timeNow);
   for (const arr of Object.values(PL)) for (const p of arr) p.userData.set(p.userData.on, p.userData.k, p.userData.vac, timeNow);
   // --- camera: third person, nearest body kept in frame
   const rendezFrame = lmFree && t >= TT.tpf && t < TT.dock2;   // keep both craft in frame during the final approach
   const target = rendezFrame ? lm.position.clone().lerp(csm.position, 0.5) : t >= TT.drogue ? csm.position.clone().add(toV(Xc.p).normalize().multiplyScalar(t >= TT.main ? 20 : 9)) : (who === 'lm' && lmFree) ? lm.position : (inStack ? stack.position.clone().add(new THREE.Vector3(0, t < 0.6 ? 55 : 60, 0).applyQuaternion(stack.quaternion)) : csm.position);
   const nearDir = (() => { const dE2 = v3.len(O) - R_E, dM = v3.len(v3.sub(O, moonS.p)) - R_M; const c = (R_E / v3.len(O)) > (R_M / v3.len(v3.sub(O, moonS.p))) ? [0, 0, 0] : moonS.p; return toV(v3.norm(v3.sub(O, c))); })();
-  camU.lerp(nearDir, 1 - Math.exp(-dt / 1.5)).normalize();
+  if (camInit || Math.abs(t - camT) > Math.max(30, 3 * dt * st.speed)) camU.copy(nearDir);   // first frame or a time jump: no slow swing
+  else camU.lerp(nearDir, 1 - Math.exp(-dt / 1.5)).normalize();
+  camInit = false; camT = t;
   const baseDist = inStack ? (t < TT.sic_off ? 230 : 160) : (t >= TT.drogue ? (t >= TT.main ? 110 : 60) : (who === 'lm' ? (t > TT.land && t < TT.asc ? 32 : 26) : (t > TT.cmsm ? 18 : 40)));
   const dist = (rendezFrame ? 30 + lm.position.distanceTo(csm.position) : baseDist) * st.zoom;
   const lowAlt = (altE < 50 && t < 3600) || (lunarGround.visible && altSite < 2) || (oceanGroup.visible && altE < 8);
@@ -600,6 +632,7 @@ function frame() {
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
+function trap(x, a) { return x < a ? 0.5 * x * x / (a * (1 - a)) : x < 1 - a ? (x - a / 2) / (1 - a) : 1 - 0.5 * (1 - x) ** 2 / (a * (1 - a)); }
 function met_(h, m, s = 0) { return h * 3600 + m * 60 + s; }
 $("loading").remove();
 requestAnimationFrame(frame);
