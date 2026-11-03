@@ -1,7 +1,8 @@
 // Apollo 11 in real time: detailed models, real sun direction, shadows and eclipses, NASA timeline.
 import * as THREE from '../../app/js/vendor/three.module.js';
 import { Track, Uniform, loadBin, v3 } from '../../app/js/data.js';
-import { materials, buildSaturnV, buildCSM, buildLM, buildSurfaceKit, buildAstronaut, buildChutes } from './models.js';
+import { materials, buildSaturnV, buildCSM, buildSurfaceKit, buildAstronaut, loadNasaLM } from './models.js';
+import { makePlume, RCS, makeEntryGlow, makeChutes } from './fx.js';
 
 const $ = (id) => document.getElementById(id);
 const store = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -29,7 +30,7 @@ const sun = new THREE.DirectionalLight(0xfff6ea, 3.0); sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048); sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.02;
 scene.add(sun, sun.target);
 const earthshine = new THREE.DirectionalLight(0x9db8ff, 0); scene.add(earthshine, earthshine.target);
-const ambient = new THREE.AmbientLight(0x404858, 0.04); scene.add(ambient);
+const ambient = new THREE.AmbientLight(0x404858, 0.12); scene.add(ambient);
 const skyFill = new THREE.HemisphereLight(0xa8c8ff, 0x4a5a3a, 0); scene.add(skyFill);
 const LD_V = '#include <common>\n#include <logdepthbuf_pars_vertex>\n', LD_F = '#include <logdepthbuf_pars_fragment>\n';
 const loader = new THREE.TextureLoader(), texC = {};
@@ -71,7 +72,9 @@ earthSpin.children[0].scale.set(1, 6356.75 / 6378.137, 1); clouds.scale.copy(ear
 earth.add(new THREE.Mesh(new THREE.SphereGeometry(1.025, 96, 48), atmosphere(0x4f8dff, 1.6)));
 earth.traverse(o => { if (o.isMesh && o.material.isMeshStandardMaterial) o.receiveShadow = false; });
 const moon = new THREE.Group(); scene.add(moon);
-const moonMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 256, 128), new THREE.MeshStandardMaterial({ map: tex('moon.jpg'), roughness: 1 })); moon.add(moonMesh);
+const lunarN = tex('lunar_detail_n.png', false); lunarN.wrapS = lunarN.wrapT = THREE.RepeatWrapping;
+const moonN = lunarN.clone(); moonN.needsUpdate = true; moonN.repeat.set(160, 80);
+const moonMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 256, 128), new THREE.MeshStandardMaterial({ map: tex('moon.jpg'), normalMap: moonN, normalScale: new THREE.Vector2(1.2, 1.2), roughness: 1 })); moon.add(moonMesh);
 const sunMesh = new THREE.Group(); scene.add(sunMesh);
 {
   const c = document.createElement('canvas'); c.width = c.height = 256; const g = c.getContext('2d'), gr = g.createRadialGradient(128, 128, 0, 128, 128, 128);
@@ -144,7 +147,9 @@ const lunarGround = new THREE.Group(); scene.add(lunarGround);
     for (let i = 0; i < 512 * 512; i++) { const v = 118 + (Math.random() * 40 - 20); im.data.set([v, v * 0.98, v * 0.95, 255], i * 4); } x.putImageData(im, 0, 0); return c; })());
   regolith.wrapS = regolith.wrapT = THREE.RepeatWrapping; regolith.colorSpace = THREE.SRGBColorSpace;
   const uv = []; for (let i = 0; i < verts.length; i += 3) uv.push(verts[i] / 6, verts[i + 2] / 6); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-  const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ map: regolith, color: 0x9a968e, roughness: 1, side: THREE.DoubleSide })); mesh.receiveShadow = true; mesh.frustumCulled = false;
+  const alb = tex('lunar_detail.jpg'); alb.wrapS = alb.wrapT = THREE.RepeatWrapping; alb.repeat.set(1 / 7, 1 / 7);
+  const nrm = lunarN.clone(); nrm.needsUpdate = true; nrm.repeat.set(0.5, 0.5);
+  const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ map: alb, normalMap: nrm, normalScale: new THREE.Vector2(1.6, 1.6), color: 0x8e8a83, roughness: 1, side: THREE.DoubleSide })); mesh.receiveShadow = true; mesh.frustumCulled = false;
   lunarGround.add(mesh);
 }
 // Launch Complex 39A: pad, mobile launcher + red launch umbilical tower, ground disc textured from the Earth map
@@ -179,11 +184,21 @@ const stackParts = { sic: V.sic, sii: V.sii, inter: V.interstage, sivb: V.sivb, 
 for (const p of Object.values(stackParts)) stack.add(p);
 for (const p of V.sla) stack.add(p);
 const csm = buildCSM(); scene.add(csm);
-const lm = buildLM(); scene.add(lm);
+const lm = await loadNasaLM(); scene.add(lm);
 const lmDescent = lm.userData.desc;          // left on the Moon at ascent
 const kit = buildSurfaceKit(); for (const k of ['flag', 'tv', 'psep', 'lrrr', 'swc']) scene.add(kit.userData[k]);
 const crew = { Armstrong: buildAstronaut('Armstrong'), Aldrin: buildAstronaut('Aldrin') }; scene.add(crew.Armstrong, crew.Aldrin);
-const chutes = buildChutes(); scene.add(chutes);
+const chutes = makeChutes(); scene.add(chutes);
+// dim environment reflection on the spacecraft only (bare metal reads as black with no environment); stronger in shadow
+const craftEnv = (() => { const pm = new THREE.PMREMGenerator(renderer), es = new THREE.Scene();
+  const g = new THREE.SphereGeometry(10, 32, 16), col = [];
+  for (let i = 0; i < g.attributes.position.count; i++) { const y = g.attributes.position.getY(i) / 10, v = 0.05 + 0.25 * Math.max(0, y) ** 1.5; col.push(v * 0.8, v * 0.9, v * 1.1); }
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  es.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })));
+  const rt = pm.fromScene(es, 0.04); pm.dispose(); return rt.texture; })();
+const craftMats = new Set();
+for (const o of [csm, lm, chutes]) o.traverse(c => { const ms = Array.isArray(c.material) ? c.material : c.material ? [c.material] : [];
+  for (const m of ms) if (m.isMeshStandardMaterial) { m.envMap = craftEnv; m.needsUpdate = true; craftMats.add(m); } });
 const cover = V.les;                         // boost protective cover + tower (jettisoned at 3:17.9)
 
 // exhaust plumes: additive shader cones (smooth gradients, flicker, expansion with altitude)
@@ -200,19 +215,25 @@ function plumeMat(c0, c1, alpha) {
         gl_FragColor = vec4(mix(c0, c1, s) * i, 1.0); }` });
 }
 function plume(len, r0, r1, c0, c1, alpha) { const g = new THREE.CylinderGeometry(r0, r1, len, 32, 1, true); g.translate(0, -len / 2, 0); const m = new THREE.Mesh(g, plumeMat(c0, c1, alpha)); m.frustumCulled = false; return m; }
+const mk = (type, parent, pos, flip = false) => { const p = makePlume(type); p.position.set(pos[0], pos[1], pos[2]); if (flip) p.rotation.z = Math.PI; parent.add(p); return p; };
 const PL = {
-  f1: V.sic.userData.nozzles.map(n => { const p = plume(60, 1.9, 5, 0xfff1c0, 0xff7a20, 1.2); p.position.set(n[0], n[1], n[2]); V.sic.add(p); return p; }),
-  j2ii: V.sii.userData.nozzles.map(n => { const p = plume(18, 1.0, 3, 0xc9d4ff, 0x7a5cff, 0.12); p.position.set(n[0], n[1], n[2]); V.sii.add(p); return p; }),
-  j2ivb: [(() => { const p = plume(16, 1.0, 3.4, 0xc9d4ff, 0x7a5cff, 0.12); p.position.set(0, 70.2 - 2.5, 0); V.sivb.add(p); return p; })()],
-  sps: [(() => { const p = plume(10, 1.25, 4, 0xffd8a8, 0xff9a60, 0.08); p.position.set(0, -2.85, 0); csm.add(p); return p; })()],
-  dps: [(() => { const p = plume(6, 0.75, 3, 0xffd8a8, 0xffa070, 0.07); p.position.set(0, 1.0, 0); lmDescent.add(p); return p; })()],
-  aps: [(() => { const p = plume(5, 0.4, 2, 0xffd0a0, 0xff9050, 0.1); p.position.set(0, 2.82, 0); lm.userData.asc.add(p); return p; })()],
-  les: [(() => { const p = plume(14, 0.3, 2.5, 0xfff4d0, 0xff9a40, 1.0); p.position.set(0, 6.4, 0); p.rotation.z = Math.PI; cover.add(p); return p; })()],
+  f1: V.sic.userData.nozzles.map(n => mk('f1', V.sic, n)),
+  j2ii: V.sii.userData.nozzles.map(n => mk('j2', V.sii, n)),
+  j2ivb: [mk('j2', V.sivb, [0, 70.2 - 2.5, 0])],
+  sps: [mk('sps', csm, [0, -2.85, 0])],
+  dps: [mk('dps', lmDescent, lmDescent.userData.nozzles[0])],
+  aps: [mk('aps', lm.userData.asc, lm.userData.asc.userData.nozzles[0])],
+  les: [mk('solid', cover, [0, 6.4, 0], true)],
 };
-const plasma = new THREE.Mesh(new THREE.SphereGeometry(3.2, 32, 16), new THREE.ShaderMaterial({ uniforms: { k: { value: 0 }, time: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false,
-  vertexShader: LD_V + 'varying vec3 vN; varying vec3 vP; void main(){ vN=normal; vP=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);\n#include <logdepthbuf_vertex>\n}',
-  fragmentShader: LD_F + 'uniform float k; uniform float time; varying vec3 vN; varying vec3 vP; void main(){\n#include <logdepthbuf_fragment>\n float f = smoothstep(-0.2, -1.0, vN.y); float tail = smoothstep(0.0, 1.0, vN.y) * 0.25; gl_FragColor = vec4(vec3(1.0, 0.55, 0.35) * (f + tail) * k * (0.9 + 0.1 * sin(time * 30.0)), 1.0); }' }));
-plasma.frustumCulled = false; csm.add(plasma);
+const plasma = makeEntryGlow(); csm.userData.cm.add(plasma);
+// RCS: four quads on the service module (radius 2.05 m, 3.1 m up) and four on the LM ascent stage
+const rcs = new RCS();
+rcs.attach(csm, [0, 1, 2, 3].map(k => { const a = Math.PI * 2 * k / 4 + Math.PI / 8; return new THREE.Vector3(Math.cos(a) * 2.2, 3.1, Math.sin(a) * 2.2); }));
+rcs.attach(lm.userData.asc, lm.userData.rcs); lm.userData.rcsQuads = lm.userData.asc.userData.rcsQuads;
+// the jettisoned service module (drifts away firing its -X jets after CM/SM separation)
+const smJet = buildCSM(); smJet.userData.cm.visible = false; scene.add(smJet); smJet.visible = false;
+smJet.traverse(c => { if (c.material?.isMeshStandardMaterial) { c.material.envMap = craftEnv; craftMats.add(c.material); } });
+rcs.attach(smJet, [0, 1, 2, 3].map(k => { const a = Math.PI * 2 * k / 4 + Math.PI / 8; return new THREE.Vector3(Math.cos(a) * 2.2, 3.1, Math.sin(a) * 2.2); }));
 
 // ---------------------------------------------------------------- mission clock: real time 1:1, anchored so it keeps running while the page is closed
 const st = { speed: 1, playing: true, follow: 'auto', zoom: 1, yaw: 0, pitch: 0 };
@@ -250,6 +271,7 @@ function sunVisibility(pKm, sunKm) {        // fraction of the solar disc not hi
 
 // ---------------------------------------------------------------- attitude & configuration by mission phase
 const tdeStart = TT.tde, tdeDock = TT.dock1;
+const DOCK_SEP = 8.15 + lm.userData.tunnelTop, DOCKY = 85.0 + DOCK_SEP;   // CSM origin to LM origin when docked
 function stackQuat(t, X) {
   const r = toV(X.p), up = r.clone().normalize();
   if (t < 12) return quatFromAxes(up, eastAt(t, X).negate());
@@ -357,9 +379,10 @@ function frame() {
     padGroup.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(east, up, new THREE.Vector3().crossVectors(east, up)));
   }
   const site = siteWorld(t), sb = siteBasis(t), altSite = v3.len(v3.sub(O, moonS.p)) - (R_M - 1.93);
-  lunarGround.visible = altSite < 40 && t > TT.pdi - 600 && t < TT.asc_end + 600;
+  const dSite = v3.len(v3.sub(O, site));
+  lunarGround.visible = altSite < 40 && dSite < 260 && t > TT.pdi - 600 && t < TT.asc_end + 600;
   if (lunarGround.visible) { place(lunarGround, site, O); lunarGround.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(sb.east, sb.up, sb.north.clone().negate())); }
-  moon.visible = !(lunarGround.visible && altSite < 25);
+  moon.visible = !(lunarGround.visible && altSite < 25 && dSite < 120);
   oceanGroup.visible = t > TT.main - 60 && t < TT.splash + 3600;
   if (oceanGroup.visible) {
     const sp2 = S('csm', TT.splash).p, up = toV(sp2).normalize(); place(oceanGroup, sp2, O); oceanGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), up);
@@ -370,7 +393,7 @@ function frame() {
   stack.visible = t < TT.evasive + 3 * 3600;
   csm.visible = true; lm.visible = t >= TT.dock1 - 5 || inStack;
   const timeNow = performance.now() / 1000;
-  for (const arr of Object.values(PL)) for (const p of arr) { p.visible = false; p.material.uniforms.time.value = timeNow; }
+  for (const arr of Object.values(PL)) for (const p of arr) { p.userData.on = false; p.userData.k = 1; p.userData.vac = 1; }
   if (stack.visible) {
     const Xs = t < TT.evasive ? S('csm', t) : S('sivb', t);
     place(stack, Xs.p, O);
@@ -389,10 +412,10 @@ function frame() {
     drop(stackParts.sic, TT.sic_off + 0.7); drop(stackParts.sii, TT.sii_off + 1); stackParts.inter.position.y = t > TT.sic_off + 30 ? -(0.5 * 12 * (t - TT.sic_off - 30) ** 2) : 0;
     cover.visible = t < TT.les + 15; cover.position.y = 98.9 + (t > TT.les ? 0.5 * 60 * Math.min(t - TT.les, 15) ** 2 / 15 : 0);
     const pr = Math.exp(-altK / 7.2);
-    if (t >= -8.9 && t < TT.sic_off) for (const p of PL.f1) { p.visible = true; p.scale.set(1 + (1 - pr) * 4, 1 + (1 - pr) * 2.5, 1 + (1 - pr) * 4); p.material.uniforms.k.value = Math.min(1, (t + 8.9) / 6); }   // ignition sequence starts T-8.9 s
-    if (t >= TT.sii_on && t < TT.sii_off) for (const p of PL.j2ii) p.visible = true;
-    if ((t >= TT.sivb_on && t < TT.sivb_off) || burning('TLI', t)) PL.j2ivb[0].visible = true;
-    if (t >= TT.les && t < TT.les + 4) PL.les[0].visible = true;
+    if (t >= -8.9 && t < TT.sic_off) for (const p of PL.f1) { p.userData.on = true; p.userData.vac = 1 - pr; p.userData.k = Math.min(1, (t + 8.9) / 6); }   // ignition sequence starts T-8.9 s
+    if (t >= TT.sii_on && t < TT.sii_off) for (const p of PL.j2ii) p.userData.on = true;
+    if ((t >= TT.sivb_on && t < TT.sivb_off) || burning('TLI', t)) PL.j2ivb[0].userData.on = true;
+    if (t >= TT.les && t < TT.les + 4) PL.les[0].userData.on = true;
     // SLA petals open at TD&E
     for (const p of V.sla) { const open = Math.max(0, Math.min(1, (t - tdeStart) / 8)); p.quaternion.setFromAxisAngle(p.userData.hinge, open * 0.8); p.visible = t < tdeStart + 120; }
     if (t > tdeStart + 8) for (const p of V.sla) { const d = t - tdeStart - 8; p.position.copy(p.userData.hinge.clone().cross(new THREE.Vector3(0, 1, 0)).multiplyScalar(-0.3 * d)).setY(85.7 - 0.05 * d); }
@@ -403,7 +426,7 @@ function frame() {
   let qC = null, csmOff = new THREE.Vector3();
   if (inStack) {   // CSM + LM ride on the stack
     csm.position.copy(stack.position).add(new THREE.Vector3(0, 94.2, 0).applyQuaternion(stack.quaternion)); csm.quaternion.copy(stack.quaternion);
-    lm.position.copy(stack.position).add(new THREE.Vector3(0, 86.0, 0).applyQuaternion(stack.quaternion)); lm.quaternion.copy(stack.quaternion);
+    lm.position.copy(stack.position).add(new THREE.Vector3(0, 85.0, 0).applyQuaternion(stack.quaternion)); lm.quaternion.copy(stack.quaternion);
   } else {
     place(csm, Xc.p, O);
     if (t < TT.eject + 400) {   // transposition, docking and extraction choreography relative to the S-IVB (approx)
@@ -414,11 +437,11 @@ function frame() {
         const u = (t - tdeStart) / (tdeDock - tdeStart);
         // separate and coast out ~16 m, pitch 180 deg, then close in until the probe meets the LM drogue (CSM origin at 99.7 m)
         flip = Math.max(0, Math.min(1, (u - 0.35) / 0.25)); flip = flip * flip * (3 - 2 * flip);
-        dist = u < 0.35 ? 94.2 + u / 0.35 * 16 : u < 0.6 ? 110.2 : 110.2 - Math.min(1, (u - 0.6) / 0.38) * (110.2 - 99.7);
-      } else { dist = 99.7 + (t > TT.eject ? Math.min(t - TT.eject, 400) * 0.3 : 0); flip = 1; }
+        dist = u < 0.35 ? 94.2 + u / 0.35 * 16 : u < 0.6 ? 110.2 : 110.2 - Math.min(1, (u - 0.6) / 0.38) * (110.2 - DOCKY);
+      } else { dist = DOCKY + (t > TT.eject ? Math.min(t - TT.eject, 400) * 0.3 : 0); flip = 1; }
       const qf = qs.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), flip * Math.PI));
       csm.quaternion.copy(qf); csm.position.copy(base).add(ax.clone().multiplyScalar(dist));
-      if (t >= tdeDock) { lm.position.copy(base).add(ax.clone().multiplyScalar(86.0 + (t > TT.eject ? Math.min(t - TT.eject, 400) * 0.3 : 0))); lm.quaternion.copy(qs); }
+      if (t >= tdeDock) { lm.position.copy(base).add(ax.clone().multiplyScalar(85.0 + (t > TT.eject ? Math.min(t - TT.eject, 400) * 0.3 : 0))); lm.quaternion.copy(qs); }
     } else {
       const docked = t < TT.undock || (t > TT.dock2 && t < TT.jet);
       if (burning('LOI1', t)) qC = quatFromAxes(thrustDir('LOI1', t), toV(Xc.p).sub(toV(moonS.p)).negate());
@@ -433,18 +456,18 @@ function frame() {
       csm.quaternion.copy(qC);
       if (docked) {   // LM docked ahead of the CM: probe-drogue, LM upside down relative to the CSM
         lm.quaternion.copy(qC).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI));
-        lm.position.copy(csm.position).add(new THREE.Vector3(0, 8.2 + 5.55, 0).applyQuaternion(qC));
+        lm.position.copy(csm.position).add(new THREE.Vector3(0, DOCK_SEP, 0).applyQuaternion(qC));
         lm.userData.desc.visible = t < TT.undock;
       }
     }
   }
-  if (burning('LOI1', t) || burning('LOI2', t) || burning('TEI', t) || burning('MCC2', t) || burning('EVA', t)) PL.sps[0].visible = true;
+  if (burning('LOI1', t) || burning('LOI2', t) || burning('TEI', t) || burning('MCC2', t) || burning('EVA', t)) PL.sps[0].userData.on = true;
   // --- LM after undocking (descent, surface, ascent, rendezvous, jettison)
   const lmFree = t >= TT.undock && !(t > TT.dock2 && t < TT.jet);
   if (lmFree && t >= track.lm.t0) {
     const Xl = S('lm', t); place(lm, Xl.p, O);
     // both craft share one trajectory point until they separate: keep the docked spacing (LM ~13.75 m beyond the CM apex)
-    if (t < TT.pdi) lm.position.add(new THREE.Vector3(0, 13.75, 0).applyQuaternion(csm.quaternion));
+    if (t < TT.pdi) lm.position.add(new THREE.Vector3(0, DOCK_SEP, 0).applyQuaternion(csm.quaternion));
     const rM = toV(Xl.p).sub(toV(moonS.p)), up = rM.clone().normalize();
     let ql;
     if (burning('DOI', t)) ql = quatFromAxes(thrustDir('DOI', t), up);
@@ -455,14 +478,25 @@ function frame() {
       const fwd = toV(Xl.v).sub(toV(moonS.v)).projectOnPlane(th).normalize();
       const down = up.clone().negate().projectOnPlane(th).normalize();
       const zDir = down.clone().multiplyScalar(Math.cos(yawF * Math.PI)).add(fwd.clone().cross(th).normalize().multiplyScalar(Math.sin(yawF * Math.PI))).normalize();
-      ql = quatFromAxes(th, zDir.lengthSq() > 0.1 ? zDir : fwd); PL.dps[0].visible = true; PL.dps[0].material.uniforms.k.value = 1;
+      ql = quatFromAxes(th, zDir.lengthSq() > 0.1 ? zDir : fwd); PL.dps[0].userData.on = true;
     } else if (t >= TT.land && t < TT.asc) {   // on the surface: tilted 4.4 deg pitch, 0.5 deg roll, yaw 13.3 deg (Table 9.6-IV); +z faces west (approx)
       const west = sb.east.clone().negate(), qs = quatFromAxes(sb.up, west.applyAxisAngle(sb.up, 13.3 * Math.PI / 180));
       ql = qs.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(4.4 * Math.PI / 180, 0, 0.5 * Math.PI / 180)));
       place(lm, site, O); lm.position.add(sb.up.clone().multiplyScalar(0));
-    } else if (t >= TT.asc && t < TT.asc_end) { ql = quatFromAxes(thrustDir('ASC', t), toV(Xl.v).sub(toV(moonS.v))); PL.aps[0].visible = true; }
+    } else if (t >= TT.asc && t < TT.asc_end) { ql = quatFromAxes(thrustDir('ASC', t), toV(Xl.v).sub(toV(moonS.v))); PL.aps[0].userData.on = true; }
     else if (t >= TT.asc_end && t < TT.dock2 + 120) ql = quatFromAxes(up, toV(Xc.p).sub(toV(Xl.p)).normalize());   // radar pointing at the CSM
     else ql = quatFromAxes(toV(Xl.v).sub(toV(moonS.v)), up.clone().negate());
+    // terminal phase -> docking: blend from the trajectory into stationkeeping ~40 m off the CSM nose, then close at ~0.1 m/s
+    if (t >= TT.tpf && t < TT.dock2) {
+      const axis = new THREE.Vector3(0, 1, 0).applyQuaternion(csm.quaternion);
+      const tAp = TT.dock2 - 360, u = Math.max(0, Math.min(1, (t - tAp) / 360)), e = 1 - Math.pow(1 - u, 2);
+      const D = 40 - (40 - DOCK_SEP) * e;
+      const target = csm.position.clone().add(axis.clone().multiplyScalar(D));
+      const bl = Math.min(1, (t - TT.tpf) / 90); lm.position.lerp(target, bl * bl * (3 - 2 * bl));
+      const qd = quatFromAxes(axis.clone().negate(), new THREE.Vector3(1, 0, 0).applyQuaternion(csm.quaternion));
+      ql = ql.clone().slerp(qd, Math.min(1, (t - TT.tpf) / 240));
+      if (Math.abs(t - tAp) < 1.5 * st.speed || Math.abs(t - (TT.dock2 - 40)) < 1.5 * st.speed) rcs.pulse(csm, axis.clone().negate(), 1.2, timeNow);   // start the approach / brake
+    }
     lm.quaternion.copy(ql);
     lm.userData.desc.visible = t < TT.asc;
   }
@@ -491,21 +525,45 @@ function frame() {
   walk(crew.Armstrong, [[met_(109, 21), -3.9, 0.4], [met_(109, 24, 15), -4.6, 0.5], [met_(109, 34), -6, 2], [met_(109, 43), -10, 15], [met_(110, 4), -6, 6], [met_(110, 18), -3, -6], [met_(110, 41), 5, -3], [met_(111, 0), -6, -14], [met_(111, 11), 60, 3], [met_(111, 18), -4, 1], [met_(111, 37), -4.2, 0.4]]);
   walk(crew.Aldrin, [[met_(109, 41), -4.2, 0.4], [met_(109, 44), -5, 1], [met_(109, 58), 2, 7], [met_(110, 4), -6, 5.2], [met_(110, 34), 3, 3], [met_(110, 53), -6, -15], [met_(111, 11), -2, -4], [met_(111, 23), -4.2, 0.4]]);
   // --- re-entry: plasma, chutes, SM jettisoned
-  const inEntry = t >= TT.ei && t < TT.drogue;
-  plasma.visible = inEntry; if (inEntry) { const v = v3.len(Xc.v), rho = Math.exp(-(v3.len(Xc.p) - R_E) / 7.2); plasma.material.uniforms.k.value = Math.min(2.5, rho * v ** 3 * 6); /* ~ density x velocity^3 (heating rate) */ plasma.material.uniforms.time.value = timeNow; }
+  const inEntry = t >= TT.ei - 120 && t < TT.drogue;
+  { const v = v3.len(Xc.v), hE = v3.len(Xc.p) - R_E, rho = Math.exp(-Math.max(hE, 0) / 7.2); plasma.userData.set(inEntry ? rho * v ** 3 * 6 : 0, timeNow); }   // ~ heating rate (density x v^3)
+  smJet.visible = t >= TT.cmsm && t < TT.cmsm + 1200;
+  if (smJet.visible) {   // service module backs away (its -X jets fire for ~10 s), tumbling slowly
+    const d = t - TT.cmsm, back = new THREE.Vector3(0, -1, 0).applyQuaternion(csm.quaternion);
+    smJet.position.copy(csm.position).add(back.multiplyScalar(0.3 + 0.9 * d + 0.02 * d * d * (d < 10 ? 1 : 0)));
+    smJet.quaternion.copy(csm.quaternion).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), d * 0.004));
+    if (d < 10) rcs.pulse(smJet, new THREE.Vector3(0, 1, 0).applyQuaternion(smJet.quaternion), 0.3, timeNow);
+  }
   const cmOnly = t >= TT.cmsm;
-  for (const c of csm.children) if (c !== csm.userData.cm && c !== plasma && c !== PL.sps[0]) c.visible = !cmOnly;
-  if (cmOnly) PL.sps[0].visible = false;
-  chutes.visible = t >= TT.drogue && t < TT.splash + 600;
-  if (chutes.visible) { chutes.position.copy(csm.position); chutes.quaternion.copy(quatFromAxes(toV(Xc.p).normalize(), new THREE.Vector3(1, 0, 0)));
-    chutes.userData.drogues.visible = t < TT.main; for (const mm2 of chutes.userData.mains) { mm2.visible = t >= TT.main; mm2.scale.setScalar(Math.min(1, (t - TT.main) / 8 + 0.15)); } }
+  for (const c of csm.children) if (c !== csm.userData.cm && c !== PL.sps[0]) c.visible = !cmOnly;
+  if (cmOnly) PL.sps[0].userData.on = false;
   if (t >= TT.drogue) csm.quaternion.copy(quatFromAxes(toV(Xc.p).normalize(), new THREE.Vector3(1, 0, 0)));
+  chutes.visible = t >= TT.drogue && t < TT.splash + 900;
+  if (chutes.visible) {   // risers attach at the apex; the CM hangs below the canopies
+    const upE = toV(Xc.p).normalize(); chutes.quaternion.copy(quatFromAxes(upE, new THREE.Vector3(1, 0, 0)));
+    chutes.position.copy(csm.position).add(new THREE.Vector3(0, 4.25 + 3.3, 0).applyQuaternion(csm.quaternion));
+    chutes.userData.set(t, TT.drogue, TT.main);
+    if (t > TT.splash) chutes.scale.setScalar(Math.max(0.01, 1 - (t - TT.splash) / 60));   // collapse after splashdown (released)
+  }
+  // --- RCS: attitude jets when a vehicle's rotation rate changes; ullage before SPS burns; the report's RCS burns
+  const rcsOk = st.speed <= 60;
+  rcs.attitude(csm, st.playing ? dt * st.speed : 0, timeNow, rcsOk && !inStack);
+  rcs.attitude(lm.userData.asc.parent === lm ? lm : lm, st.playing ? dt * st.speed : 0, timeNow, rcsOk && lmFree);
+  const fwd = new THREE.Vector3(0, 1, 0).applyQuaternion(csm.quaternion);
+  for (const b of ['LOI1', 'LOI2', 'TEI', 'MCC2', 'EVA']) { const w = meta.burns[b]; if (t > w[0] - 15 && t < w[0] + 1) rcs.pulse(csm, fwd.clone().negate(), 0.3, timeNow); }   // +X ullage
+  if (burning('SEP', t) || burning('FSEP', t) || burning('MCC5', t)) rcs.pulse(csm, fwd.clone().negate(), 0.3, timeNow);
+  if (t > TT.tde && t < TT.tde + 7.1) rcs.pulse(csm, fwd.clone().negate(), 0.3, timeNow);                              // separation from the S-IVB
+  const lmUp = new THREE.Vector3(0, 1, 0).applyQuaternion(lm.quaternion);
+  for (const b of ['CSI', 'CDH', 'TPI', 'TPF']) if (burning(b, t)) rcs.pulse(lm, lmUp.clone().negate().applyAxisAngle(new THREE.Vector3(1, 0, 0).applyQuaternion(lm.quaternion), Math.PI / 2), 0.3, timeNow);
+  rcs.update(timeNow);
+  for (const arr of Object.values(PL)) for (const p of arr) p.userData.set(p.userData.on, p.userData.k, p.userData.vac, timeNow);
   // --- camera: third person, nearest body kept in frame
-  const target = t >= TT.drogue ? csm.position.clone().add(toV(Xc.p).normalize().multiplyScalar(t >= TT.main ? 16 : 8)) : (who === 'lm' && lmFree) ? lm.position : (inStack ? stack.position.clone().add(new THREE.Vector3(0, t < 0.6 ? 55 : 60, 0).applyQuaternion(stack.quaternion)) : csm.position);
+  const rendezFrame = lmFree && t >= TT.tpf && t < TT.dock2;   // keep both craft in frame during the final approach
+  const target = rendezFrame ? lm.position.clone().lerp(csm.position, 0.5) : t >= TT.drogue ? csm.position.clone().add(toV(Xc.p).normalize().multiplyScalar(t >= TT.main ? 20 : 9)) : (who === 'lm' && lmFree) ? lm.position : (inStack ? stack.position.clone().add(new THREE.Vector3(0, t < 0.6 ? 55 : 60, 0).applyQuaternion(stack.quaternion)) : csm.position);
   const nearDir = (() => { const dE2 = v3.len(O) - R_E, dM = v3.len(v3.sub(O, moonS.p)) - R_M; const c = (R_E / v3.len(O)) > (R_M / v3.len(v3.sub(O, moonS.p))) ? [0, 0, 0] : moonS.p; return toV(v3.norm(v3.sub(O, c))); })();
   camU.lerp(nearDir, 1 - Math.exp(-dt / 1.5)).normalize();
   const baseDist = inStack ? (t < TT.sic_off ? 230 : 160) : (t >= TT.drogue ? (t >= TT.main ? 110 : 60) : (who === 'lm' ? (t > TT.land && t < TT.asc ? 32 : 26) : (t > TT.cmsm ? 18 : 40)));
-  const dist = baseDist * st.zoom;
+  const dist = (rendezFrame ? 30 + lm.position.distanceTo(csm.position) : baseDist) * st.zoom;
   const lowAlt = (altE < 50 && t < 3600) || (lunarGround.visible && altSite < 2) || (oceanGroup.visible && altE < 8);
   const tilt = lowAlt ? 78 : 25;
   let k = new THREE.Vector3().crossVectors(camU, new THREE.Vector3(0, 0, 1)); if (k.lengthSq() < 1e-6) k.set(1, 0, 0); k.normalize();
@@ -515,8 +573,9 @@ function frame() {
   const look = c.clone().negate().lerp(camU.clone().negate(), lowAlt ? 0.0 : 0.45).normalize();
   camera.up.copy(camU); camera.lookAt(camera.position.clone().add(look.lengthSq() > 0 ? look : new THREE.Vector3(1, 0, 0)));
   if (lowAlt && !lunarGround.visible) camera.lookAt(target);
-  if (lunarGround.visible && altSite < 2) camera.lookAt(target.clone().add(sb.up.clone().multiplyScalar(2)));
+  if (lunarGround.visible && altSite < 2) { camera.up.copy(sb.up); camera.lookAt(target.clone().add(sb.up.clone().multiplyScalar(2))); }
   sun.target.position.copy(target); sun.position.add(target); earthshine.target.position.copy(target); earthshine.position.add(target);
+  for (const m of craftMats) m.envMapIntensity = 0.08 + (1 - vis) * 0.5;
   // --- exposure (sunlit vs. shadowed scenes)
   renderer.toneMappingExposure = vis > 0.05 ? 1.0 : 2.5;
   // --- events & HUD
@@ -528,7 +587,7 @@ function frame() {
   const dM = v3.len(v3.sub(X.p, moonS.p));
   const nearMoon = R_M / dM > R_E / v3.len(X.p);
   const pe = mv(Tm(M), X.p), latg = Math.asin(pe[2] / v3.len(pe)), rLocal = 6378.137 * (1 - 0.0033528 * Math.sin(latg) ** 2);
-  $('alt').textContent = nearMoon ? fmt(dM - (R_M - 1.93), 1) + ' km above the Moon' : fmt(Math.max(0, v3.len(X.p) - rLocal), 1) + ' km above Earth';
+  $('alt').textContent = nearMoon ? fmt(Math.max(0, dM - (R_M - 1.93)), 1) + ' km above the Moon' : fmt(Math.max(0, v3.len(X.p) - rLocal), 1) + ' km above Earth';
   const wE = mv(M, [0, 0, 1]), vEarthFixed = v3.sub(X.v, v3.scale(v3.cross(wE, X.p), 7.2921159e-5));
   const mpole = new THREE.Vector3(0, 0, 1).applyQuaternion(mq), rM = v3.sub(X.p, moonS.p), wM = 2 * Math.PI / (27.321661 * 86400);
   const vMoonFixed = v3.sub(v3.sub(X.v, moonS.v), v3.scale(v3.cross([mpole.x, mpole.y, mpole.z], rM), wM));

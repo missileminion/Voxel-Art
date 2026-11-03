@@ -355,3 +355,64 @@ export function buildChutes() {
   g.userData.drogues = drogues; g.add(drogues);
   return g;
 }
+
+// ---------------------------------------------------------------- NASA LM model (NASA 3D Resources, public domain)
+// Loaded from apollo11/models/lm.glb (Draco-compressed glTF). Scaled to the real LM (7.04 m tall, 9.4 m across the
+// footpads); +Z = front (hatch, porch, ladder), legs on the +-X / +-Z axes, origin on the ground under the footpads.
+import { GLTFLoader } from '../../app/js/vendor/addons/GLTFLoader.js';
+import { DRACOLoader } from '../../app/js/vendor/addons/DRACOLoader.js';
+export async function loadNasaLM(url = 'apollo11/models/lm.glb') {
+  const draco = new DRACOLoader(); draco.setDecoderPath('app/js/vendor/addons/draco/');
+  const loader = new GLTFLoader(); loader.setDRACOLoader(draco);
+  let buf;
+  try { const r = await fetch(url); if (!r.ok) throw 0; buf = await r.arrayBuffer(); if (new Uint32Array(buf, 0, 1)[0] !== 0x46546C67) throw 0; }
+  catch { const r = await fetch(url.replace(/\.glb$/, '.b64.txt')); const b = atob((await r.text()).trim()); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); buf = u.buffer; }   // hosts that don't serve .glb
+  const gltf = await loader.parseAsync(buf, '');
+  const S = 1.38;                                   // model units -> metres
+  const lm = new THREE.Group(), desc = new THREE.Group(), asc = new THREE.Group();
+  lm.add(desc, asc);
+  const meshes = []; gltf.scene.updateMatrixWorld(true); gltf.scene.traverse(o => { if (o.isMesh) meshes.push(o); });
+  const foil = materials().gold.normalMap;
+  for (const m of meshes) {
+    const g = m.geometry.clone(); g.applyMatrix4(m.matrixWorld); g.scale(S, S, S); g.computeBoundingBox();
+    const bb = g.boundingBox, c = bb.getCenter(new THREE.Vector3()), r = Math.hypot(c.x, c.z), rmax = Math.max(-bb.min.x, bb.max.x, -bb.min.z, bb.max.z);
+    const mat = m.material.clone();
+    if (mat.color && mat.color.r > 0.6 && mat.color.g > 0.45 && mat.color.b < 0.35) { mat.normalMap = foil; mat.normalScale = new THREE.Vector2(0.8, 0.8); mat.metalness = 0.85; mat.roughness = 0.32; }   // gold Kapton foil
+    const mesh = new THREE.Mesh(g, mat); mesh.castShadow = mesh.receiveShadow = true;
+    const isAscent = c.y > 3.38 && rmax < 3.0;        // ascent stage sits above ~3.3 m
+    (isAscent ? asc : desc).add(mesh);
+    mesh.userData.gear = !isAscent && rmax > 2.5;      // landing gear meshes (all four legs share meshes)
+  }
+  // landing gear: fold each leg about its upper hinge (outrigger ~2.15 m out, 2.9 m up) by rotating its vertices
+  const HINGE_R = 2.15, HINGE_Y = 2.9, FOLD = -1.95;
+  for (const mesh of desc.children) {
+    if (!mesh.userData.gear) continue;
+    const p = mesh.geometry.attributes.position, deployed = Float32Array.from(p.array), folded = Float32Array.from(p.array);
+    const v = new THREE.Vector3(), q = new THREE.Quaternion();
+    for (let i = 0; i < p.count; i++) {
+      v.fromArray(deployed, i * 3);
+      const ax = Math.abs(v.x) > Math.abs(v.z) ? new THREE.Vector3(Math.sign(v.x), 0, 0) : new THREE.Vector3(0, 0, Math.sign(v.z));
+      const out = v.dot(ax); if (out < HINGE_R - 0.4) continue;
+      const tang = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), ax);
+      const hinge = ax.clone().multiplyScalar(HINGE_R).setY(HINGE_Y);
+      const w = Math.min(1, (out - (HINGE_R - 0.4)) / 0.4);           // soften the bend next to the body
+      q.setFromAxisAngle(tang, FOLD * w);
+      v.sub(hinge).applyQuaternion(q).add(hinge); v.toArray(folded, i * 3);
+    }
+    mesh.userData.deployed = deployed; mesh.userData.folded = folded;
+  }
+  lm.userData.setGear = (f) => {
+    if (lm.userData._gear === f) return; lm.userData._gear = f;
+    for (const mesh of desc.children) if (mesh.userData.gear) {
+      const a = mesh.geometry.attributes.position.array, d = mesh.userData.deployed, fo = mesh.userData.folded;
+      for (let i = 0; i < a.length; i++) a[i] = fo[i] + (d[i] - fo[i]) * f;
+      mesh.geometry.attributes.position.needsUpdate = true; mesh.geometry.computeBoundingSphere();
+    }
+  };
+  lm.userData.desc = desc; lm.userData.asc = asc;
+  desc.userData.nozzles = [[0, 1.15, 0]]; asc.userData.nozzles = [[0, 3.25, 0]];
+  lm.userData.tunnelTop = 6.4;                         // docking drogue height above the LM origin
+  // RCS quads: four clusters on the ascent stage corners (45 deg azimuths), ~4.7 m up
+  lm.userData.rcs = [0, 1, 2, 3].map(k => { const a = Math.PI / 4 + k * Math.PI / 2; return new THREE.Vector3(Math.sin(a) * 2.45, 4.75, Math.cos(a) * 2.45); });
+  return lm;
+}
