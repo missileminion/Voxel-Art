@@ -128,7 +128,7 @@ export function buildSaturnV() {
   sii.userData.nozzles = j2s;
   P.sii = shadowAll(sii);
   // S-II/S-IVB interstage (truncated cone) belongs to the S-II after separation
-  P.interstage = shadowAll(cyl(5.03, 3.3, 66.94, 70.2, m.white, 96));
+  P.interstage = shadowAll(new THREE.Group().add(cyl(5.03, 3.3, 66.94, 70.2, m.white, 96)));   // group, so staging offsets don't move the cone itself
   // S-IVB: 17.85 m x 6.6 m with aft skirt roll pattern and APS modules
   const sivbTex = canvasTex(1024, 1024, (g, w, h) => {
     g.fillStyle = '#f2f2ef'; g.fillRect(0, 0, w, h);
@@ -258,6 +258,10 @@ export function buildLM({ stowed = false } = {}) {
       const pr = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 1.7, 6), m.alu); pr.position.copy(foot).setY(-0.85); leg.add(pr);
     }
     if (k === 0) for (let y = 0.5; y < 2.6; y += 0.24) { const r = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.03, 0.04), m.alu); r.position.copy(top.clone().lerp(foot, 1 - (y - 0.18) / 2.62)).add(new THREE.Vector3(0, 0, 0.12)); leg.add(r); }
+    // re-pivot the leg on its upper hinge so it can fold: children relative to the hinge
+    for (const c of leg.children) c.position.sub(top);
+    leg.position.copy(top); leg.userData.axis = new THREE.Vector3(Math.cos(a), 0, -Math.sin(a));
+    leg.userData.secondary = leg.children.filter(c => c.geometry && c.geometry.type === 'CylinderGeometry' && c.geometry.parameters.radiusTop === 0.035);
     legs.push(leg); desc.add(leg);
   }
   desc.userData.legs = legs; desc.userData.nozzles = [[0, 1.0, 0]];
@@ -291,7 +295,14 @@ export function buildLM({ stowed = false } = {}) {
   asc.userData.nozzles = [[0, 2.82, 0]];
   lm.add(asc);
   lm.userData.desc = desc; lm.userData.asc = asc;
-  if (stowed) for (const leg of legs) leg.scale.set(0.62, 0.75, 0.62);
+  lm.userData.setGear = (f) => {   // f = 0 stowed (folded up against the descent stage, struts retracted), 1 deployed
+    for (const leg of legs) {
+      const fold = (1 - f) * -2.44, s = 0.45 + 0.55 * f;
+      leg.quaternion.setFromAxisAngle(leg.userData.axis, fold); leg.scale.setScalar(s);
+      for (const c of leg.userData.secondary) c.visible = f > 0.98;
+    }
+  };
+  lm.userData.setGear(stowed ? 0 : 1);
   return shadowAll(lm);
 }
 

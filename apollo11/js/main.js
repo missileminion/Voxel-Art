@@ -443,6 +443,8 @@ function frame() {
   const lmFree = t >= TT.undock && !(t > TT.dock2 && t < TT.jet);
   if (lmFree && t >= track.lm.t0) {
     const Xl = S('lm', t); place(lm, Xl.p, O);
+    // both craft share one trajectory point until they separate: keep the docked spacing (LM ~13.75 m beyond the CM apex)
+    if (t < TT.pdi) lm.position.add(new THREE.Vector3(0, 13.75, 0).applyQuaternion(csm.quaternion));
     const rM = toV(Xl.p).sub(toV(moonS.p)), up = rM.clone().normalize();
     let ql;
     if (burning('DOI', t)) ql = quatFromAxes(thrustDir('DOI', t), up);
@@ -471,7 +473,7 @@ function frame() {
     const west = sb.east.clone().negate(); lmDescent.quaternion.copy(quatFromAxes(sb.up, west.applyAxisAngle(sb.up, 13.3 * Math.PI / 180)));
   } else if (lmDescent.parent !== lm && t < TT.asc) { lm.add(lmDescent); lmDescent.position.set(0, 0, 0); lmDescent.quaternion.identity(); }
   else if (t >= TT.asc && !lunarGround.visible && lmDescent.parent !== lm) lmDescent.visible = false;
-  // legs deploy after undocking
+  { const gd = TT.undock - 3 * 3600; V.lm && 0; const f = Math.max(0, Math.min(1, (t - gd) / 8)); lm.userData.setGear(f); if (V.lm.userData.setGear) V.lm.userData.setGear(0); }   // landing gear deployed before undocking (time approx)
   // --- surface activities: flag, TV camera, experiments, astronauts (positions approximate, times from the report)
   const onSurf = lunarGround.visible && t > TT.land;
   const surf = (obj, e, n, tShow, tHide = Infinity) => { obj.visible = onSurf && t > tShow && t < tHide; if (!obj.visible) return;
