@@ -490,7 +490,7 @@ function frame() {
   walk(crew.Aldrin, [[met_(109, 41), -4.2, 0.4], [met_(109, 44), -5, 1], [met_(109, 58), 2, 7], [met_(110, 4), -6, 5.2], [met_(110, 34), 3, 3], [met_(110, 53), -6, -15], [met_(111, 11), -2, -4], [met_(111, 23), -4.2, 0.4]]);
   // --- re-entry: plasma, chutes, SM jettisoned
   const inEntry = t >= TT.ei && t < TT.drogue;
-  plasma.visible = inEntry; if (inEntry) { const v = v3.len(Xc.v), rho = Math.exp(-(v3.len(Xc.p) - R_E) / 7.2); plasma.material.uniforms.k.value = Math.min(2.5, rho * v ** 3 * 6);          // ~ density x velocity^3 (heating rate), scaled plasma.material.uniforms.time.value = timeNow; }
+  plasma.visible = inEntry; if (inEntry) { const v = v3.len(Xc.v), rho = Math.exp(-(v3.len(Xc.p) - R_E) / 7.2); plasma.material.uniforms.k.value = Math.min(2.5, rho * v ** 3 * 6); /* ~ density x velocity^3 (heating rate) */ plasma.material.uniforms.time.value = timeNow; }
   const cmOnly = t >= TT.cmsm;
   for (const c of csm.children) if (c !== csm.userData.cm && c !== plasma && c !== PL.sps[0]) c.visible = !cmOnly;
   if (cmOnly) PL.sps[0].visible = false;
