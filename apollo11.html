@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Apollo 11 Live</title>
+<style>
+  /* one deliberate look: a flight controller's console over a full-bleed view */
+  :root { color-scheme: dark; --bg: #000; --fg: #eef0f2; --dim: #9aa2ad; --panel: rgba(10,13,18,.74); --line: rgba(255,255,255,.12);
+          --amber: #ffb547; --sourced: #5fd38a; --derived: #6fb3ff; --approx: #f2c14e; --guess: #ff8f6b; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #view { position: fixed; inset: 0; }
+  #hud { position: fixed; left: max(16px, env(safe-area-inset-left, 0px)); top: calc(16px + env(safe-area-inset-top, 0px)); background: var(--panel);
+         border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 260px; max-width: min(380px, calc(100% - 32px)); backdrop-filter: blur(4px); }
+  #met { font-size: 22px; font-weight: 700; color: var(--amber); letter-spacing: .04em; font-variant-numeric: tabular-nums; }
+  #utc, .row { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .row b { color: var(--fg); font-weight: 600; }
+  #phase { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
+  .tag { font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid currentColor; vertical-align: 1px; }
+  .tag.sourced { color: var(--sourced); } .tag.derived { color: var(--derived); } .tag.approx { color: var(--approx); } .tag.guess { color: var(--guess); }
+  #bar { position: fixed; left: max(16px, env(safe-area-inset-left, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+         display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  button { background: rgba(255,255,255,.08); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer; }
+  button:hover { background: rgba(255,255,255,.16); } button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  #live { color: var(--amber); }
+  #spd { color: var(--dim); min-width: 80px; }
+  .grow { flex: 1; }
+  #panel { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); top: calc(16px + env(safe-area-inset-top, 0px)); bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+           width: min(380px, calc(100% - 32px)); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: auto; transform: translateX(calc(100% + 24px)); transition: transform .25s; }
+  #panel.open { transform: none; }
+  #events { list-style: none; margin: 0; padding: 6px 0; }
+  #events li { padding: 4px 12px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,.04); }
+  #events li:hover { background: rgba(255,255,255,.07); }
+  #events .d { color: var(--amber); font-variant-numeric: tabular-nums; }
+  #toast { position: fixed; left: 50%; top: calc(16px + env(safe-area-inset-top, 0px)); transform: translate(-50%, -160%); max-width: min(560px, calc(100% - 32px));
+           background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; transition: transform .3s; }
+  #toast.show { transform: translate(-50%, 0); }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; color: var(--dim); }
+  @media (max-width: 640px) { #hud { right: max(16px, env(safe-area-inset-right, 0px)); min-width: 0; } #met { font-size: 18px; } }
+  @media (prefers-reduced-motion: reduce) { #panel, #toast { transition: none; } }
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="loading">loading flight data…</div>
+<div id="hud">
+  <div id="met">MET —</div>
+  <div id="utc">—</div>
+  <div class="row"><b id="who">—</b> · <span id="sunlit">—</span></div>
+  <div class="row" id="alt">—</div>
+  <div class="row" id="vel">—</div>
+  <div class="row" id="dist">—</div>
+  <div id="phase">—</div>
+</div>
+<div id="toast"></div>
+<div id="panel"><ul id="events"></ul></div>
+<div id="bar">
+  <button id="live" title="Return to real time">● Real time</button>
+  <button id="slower" title="Slower">−</button>
+  <button id="play" title="Pause">❚❚</button>
+  <button id="faster" title="Faster">+</button>
+  <span id="spd">real time</span>
+  <span class="grow"></span>
+  <button id="followbtn">Follow: AUTO</button>
+  <button id="evtoggle">Timeline</button>
+</div>
+<script type="module" src="apollo11/js/main.js"></script>
+</body>
+</html>

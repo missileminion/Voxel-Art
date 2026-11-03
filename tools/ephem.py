@@ -67,3 +67,23 @@ def body_v(name, jd):
     if name == 'moon':
         return rot_ecl(raw_v('earthmoon', jd) + raw_v('moon', jd) * EMRAT / (1.0 + EMRAT))
     return rot_ecl(raw_v(name, jd))
+
+
+# ---- lunar orientation (DE421 physical librations: Euler angles phi, theta, psi; ICRF -> lunar PA frame)
+_lib = None
+def load_librations(dirpath):
+    global _lib
+    _lib = np.load(os.path.join(dirpath, 'jpl-librations.npy'), allow_pickle=False)
+
+def moon_matrix(jd):
+    """3x3 matrix taking ICRF (equatorial J2000) vectors to the lunar Mean-Earth body frame."""
+    a = _lib; n = a.shape[0]; L = SPAN / n
+    x = (jd - JD0) / L; i = int(np.clip(np.floor(x), 0, n - 1)); t = 2.0 * (x - i) - 1.0
+    phi, th, psi = [C.chebval(t, a[i, k]) for k in range(3)]
+    def Rz(g): c, s = np.cos(g), np.sin(g); return np.array([[c, s, 0], [-s, c, 0], [0, 0, 1]])
+    def Rx(g): c, s = np.cos(g), np.sin(g); return np.array([[1, 0, 0], [0, c, s], [0, -s, c]])
+    def Ry(g): c, s = np.cos(g), np.sin(g); return np.array([[c, 0, -s], [0, 1, 0], [s, 0, c]])
+    pa = Rz(psi) @ Rx(th) @ Rz(phi)
+    asec = np.pi / 648000          # DE421 principal-axis -> mean-Earth rotation (Williams et al. 2008)
+    me = Rx(-0.30 * asec) @ Ry(-78.56 * asec) @ Rz(-67.92 * asec)
+    return me @ pa
